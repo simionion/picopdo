@@ -1,0 +1,9 @@
+/vendor/
+.phpunit.cache/
+.env
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.swp
+*.swo 

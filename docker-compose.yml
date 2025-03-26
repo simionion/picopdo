@@ -1,0 +1,30 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db
+      - DB_NAME=pico_pdo_test
+      - DB_USER=test_user
+      - DB_PASS=test_password
+    command: tail -f /dev/null
+
+  db:
+    image: mariadb:10.6
+    environment:
+      - MYSQL_DATABASE=pico_pdo_test
+      - MYSQL_USER=test_user
+      - MYSQL_PASSWORD=test_password
+      - MYSQL_ROOT_PASSWORD=root_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+
+volumes:
+  mariadb_data: 
