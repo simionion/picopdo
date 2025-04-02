@@ -4,8 +4,8 @@ declare(strict_types=1);
 namespace Lodur\PicoPdo;
 
 use PDO;
-use PDOException;
 use PDOStatement;
+use PDOException;
 
 
 /**
@@ -62,16 +62,30 @@ trait CommonModelPicoPdoTrait
             [$sql, $params] = $this->buildInQuery($sql, $params);
         }
 
-        $stmt = $this->pdo->prepare($sql);
-
-        if (!$stmt->execute($params)) {
-            $errorInfo = $stmt->errorInfo();
-            throw new PDOException('Failed to execute query: ' . ($errorInfo[2] ?? 'Unknown error'));
+        try {
+            $stmt = $this->pdo->prepare($sql);
+            $stmt->execute($params);
+            return $stmt;
+        } catch (PDOException $e) {
+            if (defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER == 1) {
+                array_map('error_log', str_split("<br><b>{$e->getMessage()}</b><br>{$this->getPdoDebug($stmt)}", 600) ?: []);
+            }
+            throw $e;
         }
-
-        return $stmt;
     }
 
+    /**
+     * @param PDOStatement|false $stmt
+     * @return string
+     */
+    protected function getPdoDebug(PDOStatement|false $stmt): string {
+        if ($stmt === false) {
+            return 'Statement preparation failed';
+        }
+        ob_start();
+        $stmt->debugDumpParams();
+        return ob_get_clean() ?: '';
+    }
 
     /**
      * Check if a record exists in a table using a flexible WHERE condition.
@@ -94,34 +108,90 @@ trait CommonModelPicoPdoTrait
      * @param string|array<string, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return bool True if at least one record exists, false otherwise
+     * @throws PDOException
      */
     protected function exists(string $table, string|array|null $where = null, int|string|array|null $bindings = null): bool
     {
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "SELECT 1 as `true` FROM `{$table}` {$whereStr} LIMIT 1";
+        $sql = "SELECT 1 as `true` FROM {$table} {$whereStr} LIMIT 1";
         return (bool) $this->prepExec($sql, $params)->rowCount();
     }
 
 
-    /**
+     /**
      * Insert a new record into the table.
      * @param string $table Table name
      * @param array<string, mixed> $data Key-value pairs of column names and values
+     * @param array<string, mixed>|null $options Additional options for the insert operation
+     * (e.g., ['mode' => 'REPLACE'] or ['mode' => 'INSERT IGNORE'] or ['onDuplicateKeyUpdate' => ['column' => 'value']])
      * @return int|string The ID of the inserted record, 0 if failed
+     * @throws PDOException
      */
-    protected function insert(string $table, array $data): int|string
+    protected function insert(string $table, array $data, array|null $options = null): int|string
     {
-        $columns = implode('`,`', array_keys($data));
-        $values = array_values($data);
-        $placeholders = implode(',', array_fill(0, count($values), '?'));
+        $config = array_merge([
+            'mode'                 => 'INSERT',
+            'onDuplicateKeyUpdate' => []
+        ], (array)$options);
 
-        $sql = "INSERT INTO {$table} (`{$columns}`) VALUES ({$placeholders})";
-        $isSuccess = $this->prepExec($sql, $values)->rowCount() > 0;
+        $columns = implode('`,`', array_keys($data));
+        $placeholders = implode(',', array_fill(0, count($data), '?'));
+        $params = array_values($data);
+
+        $insertMode = match (strtoupper(trim((string)$config['mode']))) {
+            'REPLACE'       => 'REPLACE',
+            'INSERT IGNORE' => 'INSERT IGNORE',
+            default         => 'INSERT'
+        };
+
+        $sql = "{$insertMode} INTO {$table} (`{$columns}`) VALUES ({$placeholders})";
+
+        $onDuplicateKeyUpdate = (array) $config['onDuplicateKeyUpdate'];
+        if ($insertMode === 'INSERT' && !empty($onDuplicateKeyUpdate) && !array_is_list($onDuplicateKeyUpdate)) {
+            $updateClause = implode(', ', array_map(static fn($key) => "`{$key}` = ?", array_keys($onDuplicateKeyUpdate)));
+            $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
+            $params = array_merge($params, array_values($onDuplicateKeyUpdate));
+        }
+
+        $isSuccess = $this->prepExec($sql, $params)->rowCount() > 0;
         $lastInsertId = $this->pdo->lastInsertId() ?: 0;
         $id = $isSuccess ? $lastInsertId : 0;
         return is_numeric($id) ? (int)$id : $id;
     }
+
+
+    /**
+     * @param string $table
+     * @param array $data
+     * @return int|string
+     */
+    protected function insertIgnore(string $table, array $data): int|string
+    {
+        return $this->insert($table, $data, ['mode' => 'INSERT IGNORE']);
+    }
+
+    /**
+     * @param string $table
+     * @param array $data
+     * @return int|string
+     */
+    protected function insertReplace(string $table, array $data): int|string
+    {
+        return $this->insert($table, $data, ['mode' => 'REPLACE']);
+    }
+
+    /**
+     * @param string $table
+     * @param array $data
+     * @param array $onDuplicateKeyUpdate
+     * @return int|string
+     */
+    protected function insertOnDuplicateKeyUpdate(string $table, array $data, array $onDuplicateKeyUpdate): int|string
+    {
+        return $this->insert($table, $data, ['onDuplicateKeyUpdate' => $onDuplicateKeyUpdate]);
+    }
+
 
 
     /**
@@ -146,6 +216,7 @@ trait CommonModelPicoPdoTrait
      * @param string|array<string, mixed> $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return int Number of affected rows
+     * @throws PDOException
      */
     protected function update(string $table, array $data, string|array $where, int|string|array|null $bindings = null): int
     {
@@ -154,7 +225,7 @@ trait CommonModelPicoPdoTrait
 
         [$whereStr, $whereParams] = $this->buildWhereQuery($where, $bindings);
         $whereStr = str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "UPDATE `{$table}` SET {$setPairs} {$whereStr}";
+        $sql = "UPDATE {$table} SET {$setPairs} {$whereStr}";
 
         return $this->prepExec($sql, array_merge($params, $whereParams))->rowCount();
     }
@@ -182,13 +253,14 @@ trait CommonModelPicoPdoTrait
      * @param string|array<string, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return array<string, mixed> Associative row or empty array if not found
+     * @throws PDOException
      */
     protected function select(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null): array
     {
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "SELECT {$columnList} FROM `{$table}` {$whereStr} LIMIT 1";
+        $sql = "SELECT {$columnList} FROM {$table} {$whereStr} LIMIT 1";
         return $this->prepExec($sql, $params)->fetch(PDO::FETCH_ASSOC) ?: [];
     }
 
@@ -218,13 +290,14 @@ trait CommonModelPicoPdoTrait
      * @param string|array<string, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return array<int, array<string, mixed>> List of rows as associative arrays
+     * @throws PDOException
      */
     protected function selectAll(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null): array
     {
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = trim("SELECT {$columnList} FROM `{$table}` {$whereStr}");
+        $sql = trim("SELECT {$columnList} FROM {$table} {$whereStr}");
 
         return $this->prepExec($sql, $params)->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -250,6 +323,7 @@ trait CommonModelPicoPdoTrait
      * @param string|array<string, mixed> $where Column name, condition string, or associative array of conditions
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return int Number of affected rows
+     * @throws PDOException
      */
     protected function delete(string $table, string|array $where, int|string|array|null $bindings = null): int
     {
@@ -384,13 +458,13 @@ trait CommonModelPicoPdoTrait
     protected function buildWhereQuery(string|array|null $where = null, int|string|array|null $bindings = null): array
     {
         if (empty($where)) {
-            return ['', []];
+            return ['', $bindings === null ? [] : (is_array($bindings) ? $bindings : [$bindings])];
         }
 
         if (is_array($where)) {
             $wherePairs = implode(' AND ', array_map(static fn($key) => "`{$key}` = :where_{$key}", array_keys($where)));
             $params = array_combine(array_map(static fn($key) => ":where_{$key}", array_keys($where)), $where);
-            return [$wherePairs, $params];
+            return [$wherePairs, is_array($bindings) ? [...$bindings, ...$params] : $params];
         } // is_string
 
         // For raw WHERE conditions without bindings

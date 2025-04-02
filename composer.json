@@ -7,7 +7,10 @@
       "ext-pdo": "*"
     },
     "require-dev": {
-        "phpunit/phpunit": "^10.0"
+        "phpunit/phpunit": "^10.0",
+        "mockery/mockery": "^1.6",
+        "php-mock/php-mock": "^2.6",
+        "php-mock/php-mock-phpunit": "^2.13"
     },
     "autoload": {
         "psr-4": {
@@ -22,4 +25,4 @@
     "scripts": {
         "test": "phpunit"
     }
-} 
+}

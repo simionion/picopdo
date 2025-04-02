@@ -1,0 +1,24 @@
+docker-compose exec app vendor/bin/phpunit --coverage-text
+PHPUnit 10.5.45 by Sebastian Bergmann and contributors.
+
+Runtime:       PHP 8.2.28 with Xdebug 3.4.3
+Configuration: /var/www/html/phpunit.xml
+
+...............................................................  63 / 102 ( 61%)
+.......................................                         102 / 102 (100%)
+
+Time: 00:00.353, Memory: 16.00 MB
+
+OK (102 tests, 277 assertions)
+
+
+Code Coverage Report:
+  2025-06-04 08:19:46
+
+ Summary:
+  Classes:  0.00% (0/1)
+  Methods: 92.31% (12/13)
+  Lines:   98.98% (97/98)
+
+Lodur\PicoPdo\CommonModelPicoPdoTrait
+  Methods:  92.31% (12/13)   Lines:  98.98% ( 97/ 98)
