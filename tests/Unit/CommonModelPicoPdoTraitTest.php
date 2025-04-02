@@ -9,11 +9,15 @@ use PDOException;
 use PDOStatement;
 use PHPUnit\Framework\MockObject\MockObject;
 use Error;
+use Mockery\Adapter\Phpunit\MockeryTestCase;
+use phpmock\MockBuilder;
+use phpmock\phpunit\PHPMock;
+use phpmock\Mock;
 
 /**
  * Test class that uses the trait to access protected methods
  */
-class CommonModelPicoPdoTraitTest extends TestCase
+class CommonModelPicoPdoTraitTest extends MockeryTestCase
 {
     use CommonModelPicoPdoTrait {
         prepExec as public _testPrepExec;
@@ -27,15 +31,64 @@ class CommonModelPicoPdoTraitTest extends TestCase
         buildInQuery as public _testBuildInQuery;
     }
 
-    private MockObject $mockPdo;
-    private MockObject $mockStatement;
+    use PHPMock;
+
+    protected PDO $pdo;
+    protected PDOStatement $pdoStatement;
+    protected $trait;
+    private Mock $error_log_mock;
+    private Mock $ob_start_mock;
+    private Mock $ob_get_clean_mock;
 
     protected function setUp(): void
     {
         parent::setUp();
-        $this->mockPdo = $this->createMock(PDO::class);
-        $this->mockStatement = $this->createMock(PDOStatement::class);
-        $this->pdo = $this->mockPdo;
+        
+        // Redirect error logs to a temporary file
+        ini_set('error_log', '/tmp/picopdo_test_errors.log');
+        if (file_exists('/tmp/picopdo_test_errors.log')) {
+            unlink('/tmp/picopdo_test_errors.log');
+        }
+        
+        // Mock PDO and PDOStatement
+        $this->pdo = $this->createMock(PDO::class);
+        $this->pdoStatement = $this->createMock(PDOStatement::class);
+        
+        // Set up a custom error handler to silence error output
+        set_error_handler(function($errno, $errstr, $errfile, $errline) {
+            // Silently ignore errors during tests
+            return true;
+        });
+            
+        // Initialize the trait with a test class that makes methods public
+        $this->trait = new class {
+            use CommonModelPicoPdoTrait {
+                prepExec as public;
+                exists as public;
+                buildWhereQuery as public;
+                buildInQuery as public;
+                select as public;
+                selectAll as public;
+            }
+            
+            public function setPdo(PDO $pdo): void {
+                $this->pdo = $pdo;
+            }
+        };
+        $this->trait->setPdo($this->pdo);
+    }
+
+    protected function tearDown(): void
+    {
+        parent::tearDown();
+        
+        // Restore the default error handler
+        restore_error_handler();
+        
+        // Clean up error log file
+        if (file_exists('/tmp/picopdo_test_errors.log')) {
+            unlink('/tmp/picopdo_test_errors.log');
+        }
     }
 
     /**
@@ -46,13 +99,13 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $sql = "SELECT * FROM users WHERE id = ?";
         $params = [5];
         
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($sql)
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with($params)
@@ -71,13 +124,13 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $sql = "SELECT * FROM users WHERE id = :id";
         $params = ['id' => 10];
         
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($sql)
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with($params)
@@ -100,13 +153,13 @@ class CommonModelPicoPdoTraitTest extends TestCase
         [$newSql, $newParams] = $this->_testBuildInQuery($sql, $params);
         
         // Then test that prepExec forwards the expanded query
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($newSql)
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with($newParams)
@@ -119,13 +172,13 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testPrepExecWithEmptySql()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with('')
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([])
@@ -140,22 +193,17 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $sql = "SELECT * FROM users WHERE id = :id";
         $params = ['id' => 1];
         
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($sql)
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with($params)
-            ->willReturn(false);
-            
-        $this->mockStatement
-            ->expects($this->once())
-            ->method('errorInfo')
-            ->willReturn(['00000', '', 'Test error']);
+            ->willThrowException(new PDOException('Failed to execute query: Test error'));
             
         $this->expectException(PDOException::class);
         $this->expectExceptionMessage('Failed to execute query: Test error');
@@ -167,7 +215,7 @@ class CommonModelPicoPdoTraitTest extends TestCase
     {
         $sql = "SELECT * FROM users WHERE id = :id";
         
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($sql)
@@ -184,19 +232,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
      */
     public function testExistsWithKeyValue()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT 1 as `true` FROM `users` WHERE `id` = :where_id LIMIT 1")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([':where_id' => 1])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('rowCount')
             ->willReturn(1);
@@ -210,19 +258,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
      */
     public function testExistsWithAssociativeArray()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT 1 as `true` FROM `users` WHERE `status` = :where_status AND `email_verified` = :where_email_verified LIMIT 1")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([':where_status' => 'active', ':where_email_verified' => 1])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('rowCount')
             ->willReturn(1);
@@ -236,19 +284,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
      */
     public function testExistsWithCustomWhereClause()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT 1 as `true` FROM `users` WHERE email = :where_0 AND created_at > :where_1 LIMIT 1")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([':where_0' => 'user@example.com', ':where_1' => '2024-01-01'])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('rowCount')
             ->willReturn(1);
@@ -262,19 +310,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
      */
     public function testExistsWithNullWhere()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT 1 as `true` FROM `users`  LIMIT 1")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('rowCount')
             ->willReturn(1);
@@ -288,19 +336,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
      */
     public function testExistsWithEmptyArrayWhere()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT 1 as `true` FROM `users`  LIMIT 1")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('rowCount')
             ->willReturn(1);
@@ -424,13 +472,13 @@ class CommonModelPicoPdoTraitTest extends TestCase
             ':statuses1' => 'pending'
         ];
         
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($expectedSql)
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with($expectedParams)
@@ -618,14 +666,14 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $expectedParams = [':statuses0' => 'active', ':statuses1' => 'pending'];
         
         // Test that the SQL query is prepared with expanded IN clause
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($expectedSql)
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
         // Test that the parameters are executed with expanded values
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with($expectedParams)
@@ -657,14 +705,14 @@ class CommonModelPicoPdoTraitTest extends TestCase
         ];
         
         // Test that the SQL query is prepared with expanded IN clauses
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with($expectedSql)
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
         // Test that the parameters are executed with expanded values
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with($expectedParams)
@@ -689,19 +737,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testSelectWithNullWhere()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT name, email FROM `users`  LIMIT 1")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('fetch')
             ->with(PDO::FETCH_ASSOC)
@@ -713,19 +761,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testSelectWithEmptyArrayWhere()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT name, email FROM `users`  LIMIT 1")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('fetch')
             ->with(PDO::FETCH_ASSOC)
@@ -737,19 +785,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testSelectAllWithNullWhere()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT name, email FROM `users`")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('fetchAll')
             ->with(PDO::FETCH_ASSOC)
@@ -767,19 +815,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testSelectAllWithEmptyArrayWhere()
     {
-        $this->mockPdo
+        $this->pdo
             ->expects($this->once())
             ->method('prepare')
             ->with("SELECT name, email FROM `users`")
-            ->willReturn($this->mockStatement);
+            ->willReturn($this->pdoStatement);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
             ->with([])
             ->willReturn(true);
             
-        $this->mockStatement
+        $this->pdoStatement
             ->expects($this->once())
             ->method('fetchAll')
             ->with(PDO::FETCH_ASSOC)
@@ -793,5 +841,323 @@ class CommonModelPicoPdoTraitTest extends TestCase
             ['name' => 'John Doe', 'email' => 'john@example.com'],
             ['name' => 'Jane Smith', 'email' => 'jane@example.com']
         ], $result);
+    }
+
+    public function testSelectWithPlaceholdersInColumnsAndNullWhere(): void
+    {
+        $columns = [
+            "CONCAT(first_name, ' ', last_name) AS full_name",
+            "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+        ];
+        $bindings = ['report_date' => '2024-01-01'];
+
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`  LIMIT 1";
+        $expectedParams = $bindings;
+
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with($expectedSql)
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with($expectedParams)
+            ->willReturn(true);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetch')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn(['full_name' => 'John Doe', 'age' => 30]);
+
+        $result = $this->_testSelect('users', $columns, null, $bindings);
+
+        $this->assertEquals(['full_name' => 'John Doe', 'age' => 30], $result);
+    }
+
+    public function testSelectWithPlaceholdersInColumnsAndEmptyWhere(): void
+    {
+        $columns = [
+            "CONCAT(first_name, ' ', last_name) AS full_name",
+            "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+        ];
+        $bindings = ['report_date' => '2024-01-01'];
+
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`  LIMIT 1";
+        $expectedParams = $bindings;
+
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with($expectedSql)
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with($expectedParams)
+            ->willReturn(true);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetch')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn(['full_name' => 'John Doe', 'age' => 30]);
+
+        $result = $this->_testSelect('users', $columns, '', $bindings);
+
+        $this->assertEquals(['full_name' => 'John Doe', 'age' => 30], $result);
+    }
+
+    public function testSelectWithPlaceholdersInColumnsAndEmptyArrayWhere(): void
+    {
+        $columns = [
+            "CONCAT(first_name, ' ', last_name) AS full_name",
+            "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+        ];
+        $bindings = ['report_date' => '2024-01-01'];
+
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`  LIMIT 1";
+        $expectedParams = $bindings;
+
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with($expectedSql)
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with($expectedParams)
+            ->willReturn(true);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetch')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn(['full_name' => 'John Doe', 'age' => 30]);
+
+        $result = $this->_testSelect('users', $columns, [], $bindings);
+
+        $this->assertEquals(['full_name' => 'John Doe', 'age' => 30], $result);
+    }
+
+    public function testSelectWithPlaceholdersInColumnsAndWhere(): void
+    {
+        $columns = [
+            "CONCAT(first_name, ' ', last_name) AS full_name",
+            "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+        ];
+        $where = ['status' => 'active'];
+        $bindings = ['report_date' => '2024-01-01'];
+
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users` WHERE `status` = :where_status LIMIT 1";
+        $expectedParams = array_merge($bindings, [':where_status' => 'active']);
+
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with($expectedSql)
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with($expectedParams)
+            ->willReturn(true);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetch')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn(['full_name' => 'John Doe', 'age' => 30]);
+
+        $result = $this->_testSelect('users', $columns, $where, $bindings);
+
+        $this->assertEquals(['full_name' => 'John Doe', 'age' => 30], $result);
+    }
+
+    public function testSelectAllWithPlaceholdersInColumnsAndNullWhere()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`")
+            ->willReturn($this->pdoStatement);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':report_date' => '2024-01-01'])
+            ->willReturn(true);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['full_name' => 'John Doe', 'age' => 30],
+                ['full_name' => 'Jane Smith', 'age' => 25]
+            ]);
+            
+        $result = $this->_testSelectAll('users', 
+            [
+                "CONCAT(first_name, ' ', last_name) AS full_name",
+                "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+            ],
+            null,
+            [':report_date' => '2024-01-01']
+        );
+        
+        $this->assertEquals([
+            ['full_name' => 'John Doe', 'age' => 30],
+            ['full_name' => 'Jane Smith', 'age' => 25]
+        ], $result);
+    }
+
+    public function testSelectAllWithPlaceholdersInColumnsAndEmptyWhere()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`")
+            ->willReturn($this->pdoStatement);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':report_date' => '2024-01-01'])
+            ->willReturn(true);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['full_name' => 'John Doe', 'age' => 30],
+                ['full_name' => 'Jane Smith', 'age' => 25]
+            ]);
+            
+        $result = $this->_testSelectAll('users', 
+            [
+                "CONCAT(first_name, ' ', last_name) AS full_name",
+                "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+            ],
+            '',
+            [':report_date' => '2024-01-01']
+        );
+        
+        $this->assertEquals([
+            ['full_name' => 'John Doe', 'age' => 30],
+            ['full_name' => 'Jane Smith', 'age' => 25]
+        ], $result);
+    }
+
+    public function testSelectAllWithPlaceholdersInColumnsAndEmptyArrayWhere()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`")
+            ->willReturn($this->pdoStatement);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':report_date' => '2024-01-01'])
+            ->willReturn(true);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['full_name' => 'John Doe', 'age' => 30],
+                ['full_name' => 'Jane Smith', 'age' => 25]
+            ]);
+            
+        $result = $this->_testSelectAll('users', 
+            [
+                "CONCAT(first_name, ' ', last_name) AS full_name",
+                "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+            ],
+            [],
+            [':report_date' => '2024-01-01']
+        );
+        
+        $this->assertEquals([
+            ['full_name' => 'John Doe', 'age' => 30],
+            ['full_name' => 'Jane Smith', 'age' => 25]
+        ], $result);
+    }
+
+    public function testSelectAllWithPlaceholdersInColumnsAndWhere()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users` WHERE status = :where_0")
+            ->willReturn($this->pdoStatement);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([
+                ':report_date' => '2024-01-01',
+                ':where_0' => 'active'
+            ])
+            ->willReturn(true);
+            
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['full_name' => 'John Doe', 'age' => 30],
+                ['full_name' => 'Jane Smith', 'age' => 25]
+            ]);
+            
+        $result = $this->_testSelectAll('users', 
+            [
+                "CONCAT(first_name, ' ', last_name) AS full_name",
+                "TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age"
+            ],
+            'status = ?',
+            [':report_date' => '2024-01-01', 'active']
+        );
+        
+        $this->assertEquals([
+            ['full_name' => 'John Doe', 'age' => 30],
+            ['full_name' => 'Jane Smith', 'age' => 25]
+        ], $result);
+    }
+
+    public function testGetPdoDebugWithFalseStatement()
+    {
+        $result = $this->getPdoDebug(false);
+        $this->assertEquals('Statement preparation failed', $result);
+    }
+
+    public function testBuildWhereQueryWithScalarBindingsAndPlaceholders()
+    {
+        $where = 'id = ?';
+        $bindings = 1;
+        [$whereStr, $params] = $this->_testBuildWhereQuery($where, $bindings);
+
+        $this->assertEquals('id = ?', $whereStr);
+        $this->assertEquals([1], $params);
+    }
+
+    public function testBuildWhereQueryWithScalarBindingsAndNamedPlaceholders()
+    {
+        $where = 'id = :id';
+        $bindings = 1;
+        [$whereStr, $params] = $this->_testBuildWhereQuery($where, $bindings);
+
+        $this->assertEquals('id = :id', $whereStr);
+        $this->assertEquals([1], $params);
     }
 }

@@ -25,7 +25,7 @@ clean:
 	rm -rf .phpunit.cache/
 
 # Quick start (build, install, up)
-start: build install up
+start: build up install
 
 # Run tests with HTML coverage report
 test-coverage:
