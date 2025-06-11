@@ -31,6 +31,9 @@ trait CommonModelPicoPdoTrait
 {
     protected PDO $pdo;
 
+    private const TABLES_COLUMNS_CACHE_LIMIT = 100;
+    public array $tablesColumnsCache = [];
+
     /**
      * Combines `prepare` & `execute` in a single function and returns the PDO statement.
      *
@@ -112,6 +115,9 @@ trait CommonModelPicoPdoTrait
      */
     protected function exists(string $table, string|array|null $where = null, int|string|array|null $bindings = null): bool
     {
+        $table = $this->normalizeTableName($table);
+        $where = is_array($where) ? $this->removeInvalidColumns($table, $where) : $where;
+
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
         $sql = "SELECT 1 as `true` FROM `{$table}` {$whereStr} LIMIT 1";
@@ -119,7 +125,7 @@ trait CommonModelPicoPdoTrait
     }
 
 
-     /**
+    /**
      * Insert a new record into the table.
      * @param string $table Table name
      * @param array<string, mixed> $data Key-value pairs of column names and values
@@ -130,6 +136,9 @@ trait CommonModelPicoPdoTrait
      */
     protected function insert(string $table, array $data, array|null $options = null): int|string
     {
+        $table = $this->normalizeTableName($table);
+        $data = $this->removeInvalidColumns($table, $data);
+
         $config = array_merge([
             'mode'                 => 'INSERT',
             'onDuplicateKeyUpdate' => []
@@ -140,14 +149,14 @@ trait CommonModelPicoPdoTrait
         $params = array_values($data);
 
         $insertMode = match (strtoupper(trim((string)$config['mode']))) {
-            'REPLACE'       => 'REPLACE',
-            'INSERT IGNORE' => 'INSERT IGNORE',
+            'REPLACE'       => 'REPLACE', /*insertReplace(...)*/
+            'INSERT IGNORE' => 'INSERT IGNORE', /*insertIgnore(...)*/
             default         => 'INSERT'
         };
 
         $sql = "{$insertMode} INTO {$table} (`{$columns}`) VALUES ({$placeholders})";
 
-        $onDuplicateKeyUpdate = (array) $config['onDuplicateKeyUpdate'];
+        $onDuplicateKeyUpdate = $this->removeInvalidColumns($table, (array)$config['onDuplicateKeyUpdate']); /*insertOnDuplicateKeyUpdate(...)*/
         if ($insertMode === 'INSERT' && !empty($onDuplicateKeyUpdate) && !array_is_list($onDuplicateKeyUpdate)) {
             $updateClause = implode(', ', array_map(static fn($key) => "`{$key}` = ?", array_keys($onDuplicateKeyUpdate)));
             $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
@@ -162,8 +171,8 @@ trait CommonModelPicoPdoTrait
 
 
     /**
-     * @param string $table
-     * @param array $data
+     * @param string $table Table name
+     * @param array<string, mixed> $data Key-value pairs of column names and values
      * @return int|string
      */
     protected function insertIgnore(string $table, array $data): int|string
@@ -172,8 +181,8 @@ trait CommonModelPicoPdoTrait
     }
 
     /**
-     * @param string $table
-     * @param array $data
+     * @param string $table Table name
+     * @param array<string, mixed> $data Key-value pairs of column names and values
      * @return int|string
      */
     protected function insertReplace(string $table, array $data): int|string
@@ -182,16 +191,15 @@ trait CommonModelPicoPdoTrait
     }
 
     /**
-     * @param string $table
-     * @param array $data
-     * @param array $onDuplicateKeyUpdate
+     * @param string $table Table name
+     * @param array<string, mixed> $data Key-value pairs of column names and values
+     * @param array $onDuplicateKeyUpdate Key-value pairs of column names and values to update on duplicate key
      * @return int|string
      */
     protected function insertOnDuplicateKeyUpdate(string $table, array $data, array $onDuplicateKeyUpdate): int|string
     {
         return $this->insert($table, $data, ['onDuplicateKeyUpdate' => $onDuplicateKeyUpdate]);
     }
-
 
 
     /**
@@ -220,6 +228,10 @@ trait CommonModelPicoPdoTrait
      */
     protected function update(string $table, array $data, string|array $where, int|string|array|null $bindings = null): int
     {
+        $table = $this->normalizeTableName($table);
+        $data = $this->removeInvalidColumns($table, $data);
+        $where = is_array($where) ? $this->removeInvalidColumns($table, $where) : $where;
+
         $setPairs = implode(',', array_map(static fn($key) => "`{$key}` = :set_{$key}", array_keys($data)));
         $params = array_combine(array_map(static fn($key) => ":set_{$key}", array_keys($data)), $data);
 
@@ -257,6 +269,10 @@ trait CommonModelPicoPdoTrait
      */
     protected function select(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null): array
     {
+        $table = $this->normalizeTableName($table);
+        $columns = is_array($columns) ? $this->removeInvalidColumns($table, $columns) : $columns;
+        $where = is_array($where) ? $this->removeInvalidColumns($table, $where) : $where;
+
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
@@ -294,10 +310,14 @@ trait CommonModelPicoPdoTrait
      */
     protected function selectAll(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null): array
     {
+        $table = $this->normalizeTableName($table);
+        $columns = is_array($columns) ? $this->removeInvalidColumns($table, $columns) : $columns;
+        $where = is_array($where) ? $this->removeInvalidColumns($table, $where) : $where;
+
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = trim("SELECT {$columnList} FROM `{$table}` {$whereStr}");
+        $sql = "SELECT {$columnList} FROM `{$table}` {$whereStr}";
 
         return $this->prepExec($sql, $params)->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -327,6 +347,9 @@ trait CommonModelPicoPdoTrait
      */
     protected function delete(string $table, string|array $where, int|string|array|null $bindings = null): int
     {
+        $table = $this->normalizeTableName($table);
+        $where = is_array($where) ? $this->removeInvalidColumns($table, $where) : $where;
+
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
         $sql = "DELETE FROM `{$table}` {$whereStr}";
@@ -508,5 +531,82 @@ trait CommonModelPicoPdoTrait
 
         // For single column = value condition
         return ["`{$where}` = :where_{$where}", [":where_{$where}" => $bindings]];
+    }
+
+
+    /**
+     * Normalize a table name by removing non \W characters
+     *
+     * @param string $table
+     * @return string
+     */
+    protected function normalizeTableName(string $table): string
+    {
+        return preg_replace('/\W+/', '', $table);
+    }
+
+
+    /**
+     * Describe a table and cache the result with LRU
+     *
+     *
+     * @param string $table
+     * @return array
+     */
+    protected function getTableColumns(string $table): array
+    {
+        $table = strtolower($this->normalizeTableName($table));
+        if (isset($this->tablesColumnsCache[$table])) {
+            $tmp = $this->tablesColumnsCache[$table];
+            unset($this->tablesColumnsCache[$table]);
+            $this->tablesColumnsCache[$table] = $tmp; // reinserts at the end
+            return $tmp;
+        }
+
+        if (count($this->tablesColumnsCache) >= self::TABLES_COLUMNS_CACHE_LIMIT) {
+            array_shift($this->tablesColumnsCache);
+        }
+
+        $sql = "DESCRIBE `{$table}`";
+        $this->tablesColumnsCache[$table] = array_column($this->prepExec($sql)->fetchAll(PDO::FETCH_ASSOC), 'Field');
+        return $this->tablesColumnsCache[$table];
+    }
+
+
+    /**
+     * Filter out invalid columns from a list of columns or assoc array with columns as keys.
+     * ```
+     * $table = 'users';
+     * $columns = ['id', 'name', 'email', 'invalid_column'];
+     * $validColumns = $db->removeInvalidColumns($table, $columns);
+     * // $validColumns will be ['id', 'name', 'email']
+     *
+     * $columns = ['id' => 1, 'name' => 'John', 'email' => 'john@example.com', 'invalid_column' => 'invalid'];
+     * $validColumns = $db->removeInvalidColumns($table, $columns);
+     * // $validColumns will be ['id' => 1, 'name' => 'John', 'email' => 'john@example.com']
+     * ```
+     *
+     * @param string $table
+     * @param array $columns
+     * @return array
+     */
+    public function removeInvalidColumns(string $table, array $columns): array
+    {
+        $isList = array_is_list($columns);
+        $validColumns = array_map(strtolower(...), $this->getTableColumns($table));
+        $filteredColumns = array_filter($columns, static fn($v, $k) => in_array(strtolower($isList ? $v : $k), $validColumns, true), ARRAY_FILTER_USE_BOTH);
+
+        if ($columns !== $filteredColumns && defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER == 1) {
+            error_log("<br><b>Invalid columns of {$table} removed from query:</b>" . json_encode($columns) . ' -> ' . json_encode($filteredColumns));
+        }
+        return $isList ? array_values($filteredColumns) : $filteredColumns;
+    }
+
+    /**
+     * Reset the table columns cache.
+     * This is useful in test scenarios to ensure a clean state between tests.
+     */
+    public function resetTablesColumnsCache(): void {
+        $this->tablesColumnsCache = [];
     }
 }
