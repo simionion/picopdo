@@ -235,7 +235,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT 1 as `true` FROM `users` WHERE `id` = :where_id LIMIT 1")
+            ->with("SELECT 1 as `true` FROM users WHERE `id` = :where_id LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -261,7 +261,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT 1 as `true` FROM `users` WHERE `status` = :where_status AND `email_verified` = :where_email_verified LIMIT 1")
+            ->with("SELECT 1 as `true` FROM users WHERE `status` = :where_status AND `email_verified` = :where_email_verified LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -287,7 +287,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT 1 as `true` FROM `users` WHERE email = :where_0 AND created_at > :where_1 LIMIT 1")
+            ->with("SELECT 1 as `true` FROM users WHERE email = :where_0 AND created_at > :where_1 LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -313,7 +313,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT 1 as `true` FROM `users`  LIMIT 1")
+            ->with("SELECT 1 as `true` FROM users  LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -339,7 +339,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT 1 as `true` FROM `users`  LIMIT 1")
+            ->with("SELECT 1 as `true` FROM users  LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -450,9 +450,9 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         
         [$newSql, $newParams] = $this->_testBuildInQuery($sql, $params);
         
-        // Should not modify SQL or params since numeric keys are not supported
+        // Should not modify SQL or params since ? placeholders are not expanded by buildInQuery
         $this->assertEquals($sql, $newSql);
-        $this->assertEquals($params, $newParams);
+        $this->assertEquals([], $newParams);
     }
 
     public function testBuildInQueryWithMultipleArrays()
@@ -740,7 +740,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM `users`  LIMIT 1")
+            ->with("SELECT name, email FROM users  LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -764,7 +764,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM `users`  LIMIT 1")
+            ->with("SELECT name, email FROM users  LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -788,7 +788,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM `users`")
+            ->with("SELECT name, email FROM users ")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -818,7 +818,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM `users`")
+            ->with("SELECT name, email FROM users ")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -851,7 +851,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         ];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`  LIMIT 1";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  LIMIT 1";
         $expectedParams = $bindings;
 
         $this->pdo
@@ -885,7 +885,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         ];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`  LIMIT 1";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  LIMIT 1";
         $expectedParams = $bindings;
 
         $this->pdo
@@ -919,7 +919,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         ];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`  LIMIT 1";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  LIMIT 1";
         $expectedParams = $bindings;
 
         $this->pdo
@@ -954,7 +954,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $where = ['status' => 'active'];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users` WHERE `status` = :where_status LIMIT 1";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE `status` = :where_status LIMIT 1";
         $expectedParams = array_merge($bindings, [':where_status' => 'active']);
 
         $this->pdo
@@ -985,7 +985,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users ")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1023,7 +1023,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users ")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1061,7 +1061,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users`")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users ")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1099,7 +1099,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM `users` WHERE status = :where_0")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE status = :where_0")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement

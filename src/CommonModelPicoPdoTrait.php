@@ -8,6 +8,7 @@ use PDOStatement;
 use PDOException;
 
 
+
 /**
  * Trait CommonModelPicoPdoTrait
  *
@@ -58,7 +59,7 @@ trait CommonModelPicoPdoTrait
      */
     protected function prepExec(string $sql, array $params = []): PDOStatement
     {
-        if (array_filter($params, '\is_array')) {
+        if (array_filter($params, is_array(...))) {
             [$sql, $params] = $this->buildInQuery($sql, $params);
         }
 
@@ -68,7 +69,7 @@ trait CommonModelPicoPdoTrait
             return $stmt;
         } catch (PDOException $e) {
             if (defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER == 1) {
-                array_map('error_log', str_split("<br><b>{$e->getMessage()}</b><br>{$this->getPdoDebug($stmt)}", 600) ?: []);
+                array_map(error_log(...), str_split("<br><b>{$e->getMessage()}</b><br>{$this->getPdoDebug($stmt)}", 600) ?: []);
             }
             throw $e;
         }
@@ -99,13 +100,21 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->exists('users', ['status' => 'active', 'email_verified' => 1]);
      * ```
+     * Associative array with raw SQL:
+     * ```
+     * $db->exists('users', ['status' => $status, 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
+     * ```
      * Custom WHERE clause with bindings:
      * ```
      * $db->exists('users', 'email = ? AND created_at > ?', ['user@example.com', '2024-01-01']);
      * ```
+     * Multiple values for WHERE IN (named placeholders only)
+     * ```
+     * $db->exists('users', 'id IN (:ids)', [':ids' => [1, 2, 3]]);
+     * ```
      *
      * @param string $table Table name
-     * @param string|array<string, mixed>|null $where Column name, condition string, or associative array
+     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return bool True if at least one record exists, false otherwise
      * @throws PDOException
@@ -119,79 +128,136 @@ trait CommonModelPicoPdoTrait
     }
 
 
-     /**
+    /**
      * Insert a new record into the table.
+     * ```
+     * $db->insert('users', ['name' => 'John', 'email' => 'john@example.com']);
+     * // Returns the ID of the inserted record or 0 if failed
+     * ```
+     * Insert a new record with raw SQL:
+     * ```
+     * $db->insert('users', ['name' => 'John', 'created_at = NOW()', 'uuid = UUID()']);
+     * ```
+     * Replace a record if it already exists (Or use the wrapper for it: {@see insertReplace()}):
+     * ```
+     * $db->insert('users', ['name' => 'John', 'email' => 'john@example.com'], ['mode' => 'REPLACE']);
+     * ```
+     * Ignore the insert if the record already exists (Or use the wrapper for it: {@see insertIgnore()}):
+     * ```
+     * $db->insert('users', ['name' => 'John', 'email' => 'john@example.com'], ['mode' => 'INSERT IGNORE']);
+     * ```
+     * Insert and update if the record already exists (Or use the wrapper for it: {@see insertOnDuplicateKeyUpdate()}):
+     * ```
+     * $db->insert('users', ['name' => 'John', 'email' => 'john@example.com'], ['onDuplicateKeyUpdate' => ['name' => 'John', 'email' => 'john@example.com']]);
+     * ```
+     * Insert and get meta info:
+     * ```
+     * $db->insert('users', ['name' => 'John', 'email' => 'john@example.com'], ['meta' => true]);
+     * // Returns ['id' => 123, 'rows' => 1, 'status' => 'inserted']
+     * ```
      * @param string $table Table name
-     * @param array<string, mixed> $data Key-value pairs of column names and values
+     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @param array<string, mixed>|null $options Additional options for the insert operation
      * (e.g., ['mode' => 'REPLACE'] or ['mode' => 'INSERT IGNORE'] or ['onDuplicateKeyUpdate' => ['column' => 'value']])
-     * @return int|string The ID of the inserted record, 0 if failed
+     * @return int|string|array<string, mixed> The ID of the inserted record, 0 if failed. If 'meta' is set to true, returns an array with meta info like ['id', 'rows', 'status' => 'noop|inserted|updated']
      * @throws PDOException
      */
-    protected function insert(string $table, array $data, array|null $options = null): int|string
+    protected function insert(string $table, array $data, array|null $options = null): int|string|array
     {
         $config = array_merge([
             'mode'                 => 'INSERT',
+            'meta'                 => false, // By default returns the ID else 0. Set `true` to return ['id' => $id, 'rows' => $affectedRows, 'status' => 'noop|inserted|updated']
             'onDuplicateKeyUpdate' => []
         ], (array)$options);
 
-        $columns = implode('`,`', array_keys($data));
-        $placeholders = implode(',', array_fill(0, count($data), '?'));
-        $params = array_values($data);
+        $onDuplicateKeyUpdate = (array)$config['onDuplicateKeyUpdate'];
 
         $insertMode = match (strtoupper(trim((string)$config['mode']))) {
-            'REPLACE'       => 'REPLACE',
-            'INSERT IGNORE' => 'INSERT IGNORE',
+            'REPLACE'       => 'REPLACE', /*insertReplace(...)*/
+            'INSERT IGNORE' => 'INSERT IGNORE', /*insertIgnore(...)*/
             default         => 'INSERT'
         };
 
-        $sql = "{$insertMode} INTO {$table} (`{$columns}`) VALUES ({$placeholders})";
+        [$setClause, $params] = $this->buildSqlClause($data, 'set_');
+        $sql = "{$insertMode} INTO {$table} SET {$setClause}";
 
-        $onDuplicateKeyUpdate = (array) $config['onDuplicateKeyUpdate'];
-        if ($insertMode === 'INSERT' && !empty($onDuplicateKeyUpdate) && !array_is_list($onDuplicateKeyUpdate)) {
-            $updateClause = implode(', ', array_map(static fn($key) => "`{$key}` = ?", array_keys($onDuplicateKeyUpdate)));
+        if ($insertMode === 'INSERT' && !empty($onDuplicateKeyUpdate)) {
+            [$updateClause, $updateParams] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_');
+            $params = array_merge($params, $updateParams);
             $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
-            $params = array_merge($params, array_values($onDuplicateKeyUpdate));
         }
 
-        $isSuccess = $this->prepExec($sql, $params)->rowCount() > 0;
+        $rowCount = $this->prepExec($sql, $params)->rowCount();
+        $isSuccess =  $rowCount > 0;
         $lastInsertId = $this->pdo->lastInsertId() ?: 0;
-        $id = $isSuccess ? $lastInsertId : 0;
-        return is_numeric($id) ? (int)$id : $id;
+        $rawId = $isSuccess ? $lastInsertId : 0;
+        $id = is_numeric($rawId) ? (int)$rawId : $rawId;
+        if($config['meta']) {
+            return [
+                'id' => $id,
+                'rows' => $rowCount,
+                'status' => match ($rowCount) {
+                    0       => 'noop',
+                    1       => 'inserted',
+                    default => 'updated'
+                }
+            ];
+        }
+
+        return $id;
     }
 
 
     /**
-     * @param string $table
-     * @param array $data
-     * @return int|string
-     */
-    protected function insertIgnore(string $table, array $data): int|string
-    {
-        return $this->insert($table, $data, ['mode' => 'INSERT IGNORE']);
-    }
-
-    /**
-     * @param string $table
-     * @param array $data
-     * @return int|string
+     * This is a wrapper around {@see insert()} that performs a `REPLACE INTO`.
+     * @param string $table Table name
+     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @return int|string The ID of the inserted record, 0 if failed.
      */
     protected function insertReplace(string $table, array $data): int|string
     {
         return $this->insert($table, $data, ['mode' => 'REPLACE']);
     }
 
+
+
     /**
-     * @param string $table
-     * @param array $data
-     * @param array $onDuplicateKeyUpdate
-     * @return int|string
+     * This is a wrapper around {@see insert()} that performs an `INSERT IGNORE`.
+     * ```
+     * $db->insertIgnore('users', ['name' => 'John', 'email' => 'john@example.com']);
+     * // If record was inserted: ['id' => 123, 'rows' => 1, 'status' => 'inserted']
+     * // If record was not inserted: ['id' => 0, 'rows' => 0, 'status' => 'noop']
+     * ```
+     *
+     * @param string $table Table name
+     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @return array<string, mixed> Inserted record meta info ['id', 'rows', 'status' => 'noop|inserted|updated']
      */
-    protected function insertOnDuplicateKeyUpdate(string $table, array $data, array $onDuplicateKeyUpdate): int|string
+    protected function insertIgnore(string $table, array $data): array
     {
-        return $this->insert($table, $data, ['onDuplicateKeyUpdate' => $onDuplicateKeyUpdate]);
+        return $this->insert($table, $data, ['mode' => 'INSERT IGNORE', 'meta' => true]);
     }
 
+
+
+    /**
+     * This is a wrapper around {@see insert()} that performs an `INSERT ... ON DUPLICATE KEY UPDATE`.
+     * ```
+     * $db->insertOnDuplicateKeyUpdate('users', ['name' => 'John', 'email' => 'john@example.com'], ['name' => 'John', 'email' => 'john@example.com']);
+     * // If record was inserted: ['id' => 123, 'rows' => 1, 'status' => 'inserted']
+     * // If record was updated: ['id' => 0, 'rows' => 2, 'status' => 'updated']
+     * // If record was same: ['id' => 0, 'rows' => 0, 'status' => 'noop']
+     * ```
+     *
+     * @param string $table Table name
+     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @param array<string|int, mixed> $onDuplicateKeyUpdate Key-value pairs of column names and values to update on duplicate key or raw sql queries like 'date = NOW()'
+     * @return array<string, mixed> Inserted record meta info ['id', 'rows', 'status' => 'noop|inserted|updated']
+     */
+    protected function insertOnDuplicateKeyUpdate(string $table, array $data, array $onDuplicateKeyUpdate): array
+    {
+        return $this->insert($table, $data, ['onDuplicateKeyUpdate' => $onDuplicateKeyUpdate, 'meta' => true]);
+    }
 
 
     /**
@@ -202,30 +268,40 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->update('users', ['name' => 'John'], 'id', 1);
      * ```
+     * Key-value with raw SQL:
+     * ```
+     * $db->update('users', ['name' => 'John', 'date_verified = NOW()'], 'id', 1);
+     * ```
      * Associative WHERE:
      * ```
      * $db->update('users', ['name' => 'John'], ['id' => 1, 'active' => 1]);
+     * ```
+     * Associative WHERE with raw SQL:
+     * ```
+     * $db->update('users', ['name' => 'John'], ['id' => 1, 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
      * ```
      * Custom WHERE clause:
      * ```
      * $db->update('users', ['name' => 'John'], 'email = ? OR status = ?', ['john@example.com', 'active']);
      * ```
+     * Multiple values for WHERE IN (named placeholders only)
+     * ```
+     * $db->update('users', ['name' => 'John'], 'id IN (:ids)', [':ids' => [1, 2, 3]]);
+     * ```
      *
      * @param string $table Table name
-     * @param array<string, mixed> $data Key-value pairs of column names and values to update
-     * @param string|array<string, mixed> $where Column name, condition string, or associative array
+     * @param array<string|int, mixed> $data Key-value pairs of column names and values to update or raw sql queries like 'date = NOW()'
+     * @param string|array<string|int, mixed> $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return int Number of affected rows
      * @throws PDOException
      */
     protected function update(string $table, array $data, string|array $where, int|string|array|null $bindings = null): int
     {
-        $setPairs = implode(',', array_map(static fn($key) => "`{$key}` = :set_{$key}", array_keys($data)));
-        $params = array_combine(array_map(static fn($key) => ":set_{$key}", array_keys($data)), $data);
-
+        [$setClause, $params] = $this->buildSqlClause($data, 'set_', ', ');
         [$whereStr, $whereParams] = $this->buildWhereQuery($where, $bindings);
         $whereStr = str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "UPDATE {$table} SET {$setPairs} {$whereStr}";
+        $sql = "UPDATE {$table} SET {$setClause} {$whereStr}";
 
         return $this->prepExec($sql, array_merge($params, $whereParams))->rowCount();
     }
@@ -243,22 +319,34 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->select('users', ['name'], ['status' => 'active', 'role' => 'admin']);
      * ```
+     * Associative array with raw SQL:
+     * ```
+     * $db->select('users', ['name'], ['status' => 'active', 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
+     * ```
      * Custom WHERE clause with bindings:
      * ```
      * $db->select('users', '*', 'status = ? AND created_at > ?', ['active', '2024-01-01']);
      * ```
+     * Custom WHERE with GROUP/ORDER etc, hardcoded LIMIT to 1.
+     * ```
+     * $db->selectAll('users', '*', 'status = ? GROUP BY role,created_at ORDER BY created_at DESC, role DESC', ['active']);
+     * ```
+     * Multiple values for WHERE IN (named placeholders only)
+     * ```
+     * $db->select('users', '*', 'id IN (:ids)', [':ids' => [1, 2, 3]]);
+     * ```
      *
      * @param string $table Table name
      * @param array<string>|string|null $columns Columns to select (default '*')
-     * @param string|array<string, mixed>|null $where Column name, condition string, or associative array
+     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return array<string, mixed> Associative row or empty array if not found
      * @throws PDOException
      */
     protected function select(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null): array
     {
-        $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
+        $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
         $sql = "SELECT {$columnList} FROM {$table} {$whereStr} LIMIT 1";
         return $this->prepExec($sql, $params)->fetch(PDO::FETCH_ASSOC) ?: [];
@@ -280,14 +368,26 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->selectAll('users', '*', ['status' => 'active', 'role' => 'admin']);
      * ```
+     * Associative array with raw SQL:
+     * ```
+     * $db->selectAll('users', '*', ['status' => 'active', 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
+     * ```
      * Custom WHERE clause with bindings:
      * ```
      * $db->selectAll('users', '*', 'status = ? AND created_at > ?', ['active', '2024-01-01']);
      * ```
+     * Custom WHERE with GROUP/ORDER etc.
+     * ```
+     * $db->selectAll('users', '*', 'status = ? GROUP BY role,created_at ORDER BY created_at DESC,role DESC LIMIT 10', ['active']);
+     * ```
+     * Multiple values for WHERE IN (named placeholders only)
+     * ```
+     * $db->selectAll('users', '*', 'id IN (:ids)', [':ids' => [1, 2, 3]]);
+     * ```
      *
      * @param string $table Table name
      * @param array<string>|string|null $columns Columns to select (default '*')
-     * @param string|array<string, mixed>|null $where Column name, condition string, or associative array
+     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return array<int, array<string, mixed>> List of rows as associative arrays
      * @throws PDOException
@@ -297,10 +397,58 @@ trait CommonModelPicoPdoTrait
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = trim("SELECT {$columnList} FROM {$table} {$whereStr}");
+        $sql = "SELECT {$columnList} FROM {$table} {$whereStr}";
 
         return $this->prepExec($sql, $params)->fetchAll(PDO::FETCH_ASSOC);
     }
+
+
+
+    /**
+     * Retrieves a single scalar value from a specific column of the first matching row.
+     *
+     * Wrapper around {@see select()} that returns only the value of one column.
+     * Returns an empty string if no matching row is found.
+     *
+     * ```
+     * $db->selectValue('users', 'email', 'id', 1); // 'user1@example.com'
+     * ```
+     *
+     * @param string $table The name of the table to query.
+     * @param string $column The column from which to retrieve the value.
+     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
+     * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
+     * @return string The value of the column, or an empty string if no result is found.
+     */
+    protected function selectValue(string $table, string $column, string|array|null $where = null, int|string|array|null $bindings = null): string
+    {
+        $result = $this->select($table, $column, $where, $bindings);
+        return (string) array_shift($result);
+    }
+
+
+    /**
+     * Retrieves a list of values from a single column across all matching rows.
+     *
+     * Wrapper around {@see selectAll()} that flattens the result to a single-dimensional array
+     * containing the values of the specified table column.
+     *
+     * ```
+     * $db->selectColumn('users', 'email', 'status', 'active'); // ['user1@example.com', 'user2@example.com', ...]
+     * ```
+     *
+     * @param string $table The name of the table to query.
+     * @param string $column The column whose values should be returned.
+     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
+     * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
+     * @return array<int, string> An array of scalar values from the specified table column.
+     */
+    protected function selectColumn(string $table, string $column, string|array|null $where = null, int|string|array|null $bindings = null): array
+    {
+        $result = $this->selectAll($table, $column, $where, $bindings);
+        return arrayFlat($result);
+    }
+
 
     /**
      * Delete rows from a table using flexible WHERE conditions.
@@ -314,13 +462,21 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->delete('users', ['status' => 'inactive', 'email_verified' => 0]);
      * ```
+     * Associative WHERE with raw SQL:
+     * ```
+     * $db->delete('users', ['status' => 'inactive', 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
+     * ```
      * Custom WHERE clause with bindings:
      * ```
      * $db->delete('users', 'last_login < ? AND status != ?', ['2023-01-01', 'active']);
      * ```
+     * Multiple values for WHERE IN (named placeholders only)
+     * ```
+     * $db->delete('users', 'id IN (:ids)', [':ids' => [1, 2, 3]]);
+     * ```
      *
      * @param string $table Table name
-     * @param string|array<string, mixed> $where Column name, condition string, or associative array of conditions
+     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
      * @return int Number of affected rows
      * @throws PDOException
@@ -329,7 +485,7 @@ trait CommonModelPicoPdoTrait
     {
         [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "DELETE FROM `{$table}` {$whereStr}";
+        $sql = "DELETE FROM {$table} {$whereStr}";
         return $this->prepExec($sql, $params)->rowCount();
     }
 
@@ -364,7 +520,15 @@ trait CommonModelPicoPdoTrait
         $expandedParams = [];
 
         foreach ($params as $key => $value) {
-            if (is_array($value) && !is_numeric($key) && !empty($value)) {
+            if (is_array($value)) {
+
+                if(is_numeric($key) || empty($value)){
+                    if(defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER == 1) {
+                        error_log('Provided array for IN clause is empty or key is numeric - ' . $sql . ' - ' . json_encode([$key => $value]));
+                    }
+                    unset($params[(string)$key]);
+                    continue;
+                }
 
                 // Only support named parameters for array values
                 $searchKey = str_starts_with($key, ':') ? $key : ":{$key}";
@@ -393,6 +557,44 @@ trait CommonModelPicoPdoTrait
 
 
     /**
+     * Build SQL clauses and parameters from mixed data array
+     * ```
+     * buildSqlClause(['name' => 'John', 'email' => 'john@example.com', 'created_at = NOW()'], 'insert_');
+     * //sql: `name` = :insert_name, `email` = :insert_email, created_at = NOW()
+     * //params: [':insert_name' => 'John', ':insert_email' => 'john@example.com']
+     * ```
+     * With AND joiner
+     * ```
+     * buildSqlClause(['name' => 'John', 'email' => 'john@example.com', 'created_at = NOW()'], 'insert_', ' AND ');
+     * //sql: `name` = :insert_name AND `email` = :insert_email AND created_at = NOW()
+     * //params: [':insert_name' => 'John', ':insert_email' => 'john@example.com']
+     * ```
+     *
+     * @param array<int|string, mixed> $data Mixed array of key-value pairs and raw SQL strings
+     * @param string|null $prefix Parameter prefix (e.g., 'set_', 'insert_', 'update_')
+     * @param string $joiner How to join the clauses (e.g., ', ', ' AND ', ' OR ')
+     * @return array<string|int, string|array<string, mixed>> [sqlClause, parameters]
+     */
+    protected function buildSqlClause(array $data, string|null $prefix = null, string $joiner = ', '): array
+    {
+        $sqlPairs = [];
+        $params = [];
+
+        foreach ($data as $key => $value) {
+            if (is_numeric($key)) {
+                // Raw SQL like "updated_at = NOW()"
+                $sqlPairs[] = $value;
+            } else {
+                // Key-value pair like "name" => "John"
+                $sqlPairs[] = "`{$key}` = :{$prefix}{$key}";
+                $params[":{$prefix}{$key}"] = $value;
+            }
+        }
+
+        return [implode($joiner, $sqlPairs), $params];
+    }
+
+    /**
      * Builds a SQL `WHERE` clause and its corresponding named parameter bindings
      * from flexible inputs.
      *
@@ -418,11 +620,18 @@ trait CommonModelPicoPdoTrait
      * // [':where_id' => 1]
      * ```
      *
-     * 2. Multiple key-value conditions
+     * 2.a Multiple key-value conditions
      * ```
      * buildWhereQuery(['id' => 1, 'status' => 'active']);
      * // `id` = :where_id AND `status` = :where_status
      * // [':where_id' => 1, ':where_status' => 'active']
+     * ```
+     *
+     * 2.b Multiple key-value conditions with raw SQL as keyless entries
+     * ```
+     * buildWhereQuery(['id' => 1, 'status' => 'active', 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
+     * // `id` = :where_id AND `status` = :where_status AND email_verified != 0 AND created_at > :date
+     * // [':where_id' => 1, ':where_status' => 'active', ':date' => $date]
      * ```
      *
      * 3. Raw SQL with `?` placeholders and bindings
@@ -462,9 +671,8 @@ trait CommonModelPicoPdoTrait
         }
 
         if (is_array($where)) {
-            $wherePairs = implode(' AND ', array_map(static fn($key) => "`{$key}` = :where_{$key}", array_keys($where)));
-            $params = array_combine(array_map(static fn($key) => ":where_{$key}", array_keys($where)), $where);
-            return [$wherePairs, is_array($bindings) ? [...$bindings, ...$params] : $params];
+            [$whereClause, $params] = $this->buildSqlClause($where, 'where_', ' AND ');
+            return [$whereClause, $bindings === null ? $params : [...((array)$bindings), ...$params]] ;
         } // is_string
 
         // For raw WHERE conditions without bindings
@@ -474,7 +682,7 @@ trait CommonModelPicoPdoTrait
 
         // Handle placeholders in WHERE clause
         if (is_array($bindings) && !empty($bindings)) {
-            if (array_filter($bindings, '\is_array')) {
+            if (array_filter($bindings, is_array(...))) {
                 [$where, $bindings] = $this->buildInQuery($where, $bindings);
             }
 
@@ -507,6 +715,66 @@ trait CommonModelPicoPdoTrait
         }
 
         // For single column = value condition
-        return ["`{$where}` = :where_{$where}", [":where_{$where}" => $bindings]];
+        return ["{$where} = :where_{$where}", [":where_{$where}" => $bindings]];
+    }
+
+
+
+    /**
+     * Returns the list of columns for a given table
+     *
+     * @param string $table
+     * @return array
+     */
+    protected function getTableColumns(string $table): array
+    {
+        $table = strtolower($this->normalizeTableName($table));
+        $sql = "DESCRIBE `{$table}`";
+        $key = CommonCache::createKey($sql);
+        if (is_array($cols = CommonCache::get($key))) {
+            return $cols;
+        }
+
+        $cols = array_column($this->prepExec($sql)->fetchAll(PDO::FETCH_ASSOC), 'Field');
+        CommonCache::set($key, $cols);
+        return $cols;
+    }
+
+
+    /**
+     * Filter out invalid columns from a list of columns or assoc array with columns as keys.
+     * ```
+     * $table = 'users';
+     * $columns = ['id', 'name', 'email', 'invalid_column'];
+     * $validColumns = $db->removeInvalidColumns($table, $columns);
+     * // $validColumns will be ['id', 'name', 'email']
+     *
+     * $columns = ['id' => 1, 'name' => 'John', 'email' => 'john@example.com', 'invalid_column' => 'invalid'];
+     * $validColumns = $db->removeInvalidColumns($table, $columns);
+     * // $validColumns will be ['id' => 1, 'name' => 'John', 'email' => 'john@example.com']
+     * ```
+     *
+     * @param string $table
+     * @param array $columns
+     * @return array
+     */
+    protected function removeInvalidColumns(string $table, array $columns): array
+    {
+        $isList = array_is_list($columns);
+        $validColumns = array_map(strtolower(...), $this->getTableColumns($table));
+        $filteredColumns = array_filter($columns, static fn($v, $k) => in_array(strtolower($isList ? $v : $k), $validColumns, true), ARRAY_FILTER_USE_BOTH);
+        return $isList ? array_values($filteredColumns) : $filteredColumns;
+    }
+
+
+    /**
+     * Normalize a table name by removing invalid characters.
+     *
+     * @param string $table
+     * @return string
+     */
+    private function normalizeTableName(string $table): string
+    {
+        return preg_replace('/\W/', '', $table);
     }
 }
