@@ -9,6 +9,7 @@ use PDOException;
 
 
 
+
 /**
  * Trait CommonModelPicoPdoTrait
  *
@@ -76,8 +77,10 @@ trait CommonModelPicoPdoTrait
     }
 
     /**
-     * @param PDOStatement|false $stmt
-     * @return string
+     * Get debug information from a PDO statement for error reporting.
+     *
+     * @param PDOStatement|false $stmt The PDO statement to debug, or false if preparation failed
+     * @return string Debug information as a string, or error message if statement is false
      */
     protected function getPdoDebug(PDOStatement|false $stmt): string {
         if ($stmt === false) {
@@ -121,10 +124,7 @@ trait CommonModelPicoPdoTrait
      */
     protected function exists(string $table, string|array|null $where = null, int|string|array|null $bindings = null): bool
     {
-        [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
-        $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "SELECT 1 as `true` FROM {$table} {$whereStr} LIMIT 1";
-        return (bool) $this->prepExec($sql, $params)->rowCount();
+        return (bool)$this->select($table, '1 as `true`', $where, $bindings, 'LIMIT 1')->fetchColumn();
     }
 
 
@@ -308,145 +308,90 @@ trait CommonModelPicoPdoTrait
 
 
     /**
-     * Select specific columns from one record with optional WHERE conditions.
+     * Select rows from a table using flexible WHERE conditions.
+     * It returns a PDOStatement object that can be used to fetch results.
      *
      * ### Usage examples:
      * Classic key-value:
      * ```
-     * $db->select('users', ['name', 'email'], 'id', 1);
+     * $db->select('users', 'id, name', 'id', 1)->fetch(PDO::FETCH_ASSOC);
      * ```
-     * Associative array:
+     * Classic key-value with limit etc:
      * ```
-     * $db->select('users', ['name'], ['status' => 'active', 'role' => 'admin']);
+     * $db->select('users', 'id, name', 'status', 'active', 'ORDER BY name LIMIT 1')->fetch(PDO::FETCH_ASSOC);
      * ```
-     * Associative array with raw SQL:
+     * Associative WHERE:
      * ```
-     * $db->select('users', ['name'], ['status' => 'active', 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
+     * $db->select('users', 'id, name', ['status' => 'active', 'email_verified' => 1])->fetch(PDO::FETCH_ASSOC);
+     * ```
+     * Associative WHERE with raw SQL:
+     * ```
+     * $db->select('users', 'id, name', ['status' => 'active', 'email_verified != 0', 'created_at > :date'], [':date' => $date])->fetch(PDO::FETCH_ASSOC);
      * ```
      * Custom WHERE clause with bindings:
      * ```
-     * $db->select('users', '*', 'status = ? AND created_at > ?', ['active', '2024-01-01']);
-     * ```
-     * Custom WHERE with GROUP/ORDER etc, hardcoded LIMIT to 1.
-     * ```
-     * $db->selectAll('users', '*', 'status = ? GROUP BY role,created_at ORDER BY created_at DESC, role DESC', ['active']);
+     * $db->select('users', 'id, name', 'last_login < ? AND status != ?', ['2023-01-01', 'active'])->fetch(PDO::FETCH_ASSOC);
      * ```
      * Multiple values for WHERE IN (named placeholders only)
      * ```
-     * $db->select('users', '*', 'id IN (:ids)', [':ids' => [1, 2, 3]]);
+     * $db->select('users', 'id, name', 'id IN (:ids)', [':ids' => [1, 2, 3]])->fetch(PDO::FETCH_ASSOC);
      * ```
      *
      * @param string $table Table name
      * @param array<string>|string|null $columns Columns to select (default '*')
      * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
-     * @return array<string, mixed> Associative row or empty array if not found
-     * @throws PDOException
+     * @param string|null $extraQuerySuffix Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
+     * @return PDOStatement|false
      */
-    protected function select(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null): array
+    protected function select(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $extraQuerySuffix = null): PDOStatement|false
     {
-        [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
+        [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
         $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "SELECT {$columnList} FROM {$table} {$whereStr} LIMIT 1";
-        return $this->prepExec($sql, $params)->fetch(PDO::FETCH_ASSOC) ?: [];
+        $sql = "SELECT {$columnList} FROM {$table} {$whereStr} {$extraQuerySuffix}";
+        return $this->prepExec($sql, $params);
     }
 
+
     /**
-     * Select all records from a table with optional WHERE conditions.
-     *
-     * ### Usage examples:
-     * Classic key-value:
-     * ```
-     * $db->selectAll('users', '*', 'name', 'John');
-     * ```
-     * Without filter:
-     * ```
-     * $db->selectAll('users');
-     * ```
-     * Associative array:
-     * ```
-     * $db->selectAll('users', '*', ['status' => 'active', 'role' => 'admin']);
-     * ```
-     * Associative array with raw SQL:
-     * ```
-     * $db->selectAll('users', '*', ['status' => 'active', 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
-     * ```
-     * Custom WHERE clause with bindings:
-     * ```
-     * $db->selectAll('users', '*', 'status = ? AND created_at > ?', ['active', '2024-01-01']);
-     * ```
-     * Custom WHERE with GROUP/ORDER etc.
-     * ```
-     * $db->selectAll('users', '*', 'status = ? GROUP BY role,created_at ORDER BY created_at DESC,role DESC LIMIT 10', ['active']);
-     * ```
-     * Multiple values for WHERE IN (named placeholders only)
-     * ```
-     * $db->selectAll('users', '*', 'id IN (:ids)', [':ids' => [1, 2, 3]]);
-     * ```
+     * Wrapper for {@see select()} to fetch one row only, LIMIT 1 is appended automatically.
      *
      * @param string $table Table name
      * @param array<string>|string|null $columns Columns to select (default '*')
      * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
-     * @return array<int, array<string, mixed>> List of rows as associative arrays
-     * @throws PDOException
+     * @param string|null $extraQuerySuffix Extra query suffix (e.g. GROUP BY, ORDER BY .. ) LIMIT 1 is appended automatically.
+     * @return array
      */
-    protected function selectAll(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null): array
+    protected function selectOne(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $extraQuerySuffix = null): array
     {
-        $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
-        [$whereStr, $params] = $this->buildWhereQuery($where, $bindings);
-        $whereStr = empty($where) || str_contains($whereStr, 'WHERE ') ? $whereStr : 'WHERE ' . $whereStr;
-        $sql = "SELECT {$columnList} FROM {$table} {$whereStr}";
-
-        return $this->prepExec($sql, $params)->fetchAll(PDO::FETCH_ASSOC);
+        $stmt = $this->select($table, $columns, $where, $bindings, $extraQuerySuffix . ' LIMIT 1');
+        if (!$stmt) {
+            return [];
+        }
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $result ?: [];
     }
 
-
-
     /**
-     * Retrieves a single scalar value from a specific column of the first matching row.
+     * Wrapper for {@see select()} to fetch all rows.
      *
-     * Wrapper around {@see select()} that returns only the value of one column.
-     * Returns an empty string if no matching row is found.
-     *
-     * ```
-     * $db->selectValue('users', 'email', 'id', 1); // 'user1@example.com'
-     * ```
-     *
-     * @param string $table The name of the table to query.
-     * @param string $column The column from which to retrieve the value.
+     * @param string $table Table name
+     * @param array<string>|string|null $columns Columns to select (default '*')
      * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
-     * @return string The value of the column, or an empty string if no result is found.
+     * @param string|null $extraQuerySuffix Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
+     * @return array
      */
-    protected function selectValue(string $table, string $column, string|array|null $where = null, int|string|array|null $bindings = null): string
+    protected function selectAll(string $table, array|string|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $extraQuerySuffix = null): array
     {
-        $result = $this->select($table, $column, $where, $bindings);
-        return (string) array_shift($result);
-    }
-
-
-    /**
-     * Retrieves a list of values from a single column across all matching rows.
-     *
-     * Wrapper around {@see selectAll()} that flattens the result to a single-dimensional array
-     * containing the values of the specified table column.
-     *
-     * ```
-     * $db->selectColumn('users', 'email', 'status', 'active'); // ['user1@example.com', 'user2@example.com', ...]
-     * ```
-     *
-     * @param string $table The name of the table to query.
-     * @param string $column The column whose values should be returned.
-     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
-     * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
-     * @return array<int, string> An array of scalar values from the specified table column.
-     */
-    protected function selectColumn(string $table, string $column, string|array|null $where = null, int|string|array|null $bindings = null): array
-    {
-        $result = $this->selectAll($table, $column, $where, $bindings);
-        return arrayFlat($result);
+        $stmt = $this->select($table, $columns, $where, $bindings, $extraQuerySuffix);
+        if (!$stmt) {
+            return [];
+        }
+        $result = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return $result ?: [];
     }
 
 
@@ -509,7 +454,7 @@ trait CommonModelPicoPdoTrait
      *
      * @param string $sql The SQL query containing named placeholders.
      * @param array<string, mixed> $params The parameters to bind, where array values are expanded.
-     * @return array{string, array<string, mixed>} The modified SQL query and the updated bind parameters.
+     * @return array{0: string, 1: array<string, mixed>} The modified SQL query and the updated bind parameters.
      */
     protected function buildInQuery(string $sql, array $params): array
     {
@@ -573,7 +518,7 @@ trait CommonModelPicoPdoTrait
      * @param array<int|string, mixed> $data Mixed array of key-value pairs and raw SQL strings
      * @param string|null $prefix Parameter prefix (e.g., 'set_', 'insert_', 'update_')
      * @param string $joiner How to join the clauses (e.g., ', ', ' AND ', ' OR ')
-     * @return array<string|int, string|array<string, mixed>> [sqlClause, parameters]
+     * @return array{0: string, 1: array<string, mixed>} [sqlClause, parameters]
      */
     protected function buildSqlClause(array $data, string|null $prefix = null, string $joiner = ', '): array
     {
@@ -662,7 +607,7 @@ trait CommonModelPicoPdoTrait
      * // []
      * @param string|array<string, mixed> $where Column name, condition string, or associative array
      * @param int|string|array<string|int>|null $bindings Value for single column or array of bound values for custom condition
-     * @return array{string, array<string, mixed>} The WHERE clause and parameter bindings
+     * @return array{0: string, 1: array<string, mixed>} The WHERE clause and parameter bindings
      */
     protected function buildWhereQuery(string|array|null $where = null, int|string|array|null $bindings = null): array
     {
@@ -723,8 +668,8 @@ trait CommonModelPicoPdoTrait
     /**
      * Returns the list of columns for a given table
      *
-     * @param string $table
-     * @return array
+     * @param string $table The table name
+     * @return array<int, string> Array of column names
      */
     protected function getTableColumns(string $table): array
     {
@@ -754,9 +699,9 @@ trait CommonModelPicoPdoTrait
      * // $validColumns will be ['id' => 1, 'name' => 'John', 'email' => 'john@example.com']
      * ```
      *
-     * @param string $table
-     * @param array $columns
-     * @return array
+     * @param string $table The table name
+     * @param array<int|string, mixed> $columns Array of column names or associative array with column names as keys
+     * @return array<int|string, mixed> Filtered array with only valid columns
      */
     protected function removeInvalidColumns(string $table, array $columns): array
     {
@@ -770,8 +715,8 @@ trait CommonModelPicoPdoTrait
     /**
      * Normalize a table name by removing invalid characters.
      *
-     * @param string $table
-     * @return string
+     * @param string $table The table name to normalize
+     * @return string The normalized table name with invalid characters removed
      */
     private function normalizeTableName(string $table): string
     {

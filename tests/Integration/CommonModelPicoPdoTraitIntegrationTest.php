@@ -38,6 +38,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
             use \Lodur\PicoPdo\CommonModelPicoPdoTrait {
                 insert as public;
                 select as public;
+                selectOne as public;
                 update as public;
                 delete as public;
                 exists as public;
@@ -72,7 +73,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertGreaterThan(0, $id);
         
         // Test select
-        $result = $this->trait->select('test_users', ['name', 'email'], 'id', $id);
+        $result = $this->trait->selectOne('test_users', ['name', 'email'], 'id', $id);
         $this->assertEquals($data['name'], $result['name']);
         $this->assertEquals($data['email'], $result['email']);
     }
@@ -87,7 +88,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $id = $this->trait->insert('test_users', $data);
         
         // Verify default values
-        $result = $this->trait->select('test_users', ['status', 'created_at'], 'id', $id);
+        $result = $this->trait->selectOne('test_users', ['status', 'created_at'], 'id', $id);
         $this->assertEquals('active', $result['status']);
         $this->assertNotNull($result['created_at']);
     }
@@ -107,7 +108,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertEquals(1, $affected);
         
         // Verify update
-        $result = $this->trait->select('test_users', ['name'], 'id', $id);
+        $result = $this->trait->selectOne('test_users', ['name'], 'id', $id);
         $this->assertEquals('Updated Name', $result['name']);
     }
 
@@ -127,7 +128,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertEquals(1, $affected);
         
         // Verify update
-        $result = $this->trait->select('test_users', ['status'], 'id', $id);
+        $result = $this->trait->selectOne('test_users', ['status'], 'id', $id);
         $this->assertEquals('inactive', $result['status']);
     }
 
@@ -145,7 +146,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertEquals(1, $affected);
         
         // Verify deletion
-        $result = $this->trait->select('test_users', ['id'], 'id', $id);
+        $result = $this->trait->selectOne('test_users', ['id'], 'id', $id);
         $this->assertEmpty($result);
     }
 
@@ -164,7 +165,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertEquals(1, $affected);
         
         // Verify deletion
-        $result = $this->trait->select('test_users', ['id'], 'id', $id);
+        $result = $this->trait->selectOne('test_users', ['id'], 'id', $id);
         $this->assertEmpty($result);
     }
 
