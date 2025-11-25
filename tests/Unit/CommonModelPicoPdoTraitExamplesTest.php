@@ -85,7 +85,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name, email FROM users WHERE `id` = :where_id AND `status` = :where_status ')
+            ->with('SELECT name, email FROM users WHERE `id` = :where_id AND `status` = :where_status')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -120,13 +120,13 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name, email FROM users WHERE status = ? AND role IN (:roles0,:roles1) ')
+            ->with('SELECT name, email FROM users WHERE status = :where_0 AND role IN (:roles0,:roles1)')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
             ->method('execute')
             ->with([
-               'active',
+               ':where_0' => 'active',
                ':roles0' => 'admin',
                ':roles1' => 'moderator'
             ])
@@ -238,17 +238,17 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name, email FROM users WHERE status = ? AND role IN (:roles0,:roles1) AND created_at < NOW() AND email LIKE ? AND age > ? ')
+            ->with('SELECT name, email FROM users WHERE status = :where_0 AND role IN (:roles0,:roles1) AND created_at < NOW() AND email LIKE :where_1 AND age > :where_2')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
             ->method('execute')
             ->with([
-               'active',
+               ':where_0' => 'active',
                ':roles0' => 'admin',
                ':roles1' => 'moderator',
-               '%@example.com',
-                18
+               ':where_1' => '%@example.com',
+               ':where_2' => 18
             ])
             ->willReturn(true);
 
@@ -273,7 +273,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name AS full_name, COUNT(*) AS total_count FROM users WHERE id = :where_id ')
+            ->with('SELECT name AS full_name, COUNT(*) AS total_count FROM users WHERE id = :where_id')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -302,7 +302,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name AS user_name, COUNT(*) AS order_count FROM users WHERE status = :status ')
+            ->with('SELECT name AS user_name, COUNT(*) AS order_count FROM users WHERE status = :status')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -333,7 +333,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT CONCAT(first_name, " ", last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, CURDATE()) AS age FROM users WHERE id = :where_id ')
+            ->with('SELECT CONCAT(first_name, " ", last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, CURDATE()) AS age FROM users WHERE id = :where_id')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -365,12 +365,12 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name, email FROM users WHERE user = ? ')
+            ->with('SELECT name, email FROM users WHERE user = :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
             ->method('execute')
-            ->with([22])
+            ->with([':where_0' => 22])
             ->willReturn(true);
 
         $this->statement->expects($this->once())
@@ -394,7 +394,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name, email FROM users WHERE status = :where_0 AND role = :where_1 ')
+            ->with('SELECT name, email FROM users WHERE status = :where_0 AND role = :where_1')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -412,7 +412,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name, email FROM users WHERE status = :where_0 ')
+            ->with('SELECT name, email FROM users WHERE status = :where_0')
             ->willReturn($this->statement);
 
         // We expect execute to be called with both parameters, as PHP maintains both named and numeric indices
@@ -440,7 +440,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name, email FROM users WHERE status = :status AND role = :role ')
+            ->with('SELECT name, email FROM users WHERE status = :status AND role = :role')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -458,7 +458,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users WHERE id IN (:ids0,:ids1,:ids2) ')
+            ->with('SELECT name FROM users WHERE id IN (:ids0,:ids1,:ids2)')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -485,7 +485,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users WHERE id IN (:ids) ')
+            ->with('SELECT name FROM users WHERE id IN (:ids)')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -503,7 +503,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users WHERE status = :where_0 AND deleted_at IS :where_1 ')
+            ->with('SELECT name FROM users WHERE status = :where_0 AND deleted_at IS :where_1')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -526,12 +526,12 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users WHERE status = :status AND role = ? ')
+            ->with('SELECT name FROM users WHERE status = :status AND role = :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
             ->method('execute')
-            ->with([':status' => 'active', 'admin'])
+            ->with([':status' => 'active', ':where_0' => 'admin'])
             ->willThrowException(new \PDOException('SQLSTATE[HY093]: Invalid parameter number: number of bound variables does not match number of tokens'));
 
         $this->expectException(\PDOException::class);
@@ -544,7 +544,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users WHERE id = :where_0 ')
+            ->with('SELECT name FROM users WHERE id = :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -562,7 +562,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT user-name AS display_name, email@domain AS contact FROM users WHERE id = :where_0 ')
+            ->with('SELECT user-name AS display_name, email@domain AS contact FROM users WHERE id = :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -585,7 +585,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users  ')
+            ->with('SELECT name FROM users')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -603,7 +603,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT invalid_column FROM users WHERE id = :where_0 ')
+            ->with('SELECT invalid_column FROM users WHERE id = :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -621,7 +621,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users; DROP TABLE users; -- WHERE id = :where_0 ')
+            ->with('SELECT name FROM users; DROP TABLE users; -- WHERE id = :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -639,7 +639,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT name FROM users WHERE age > :where_0 ')
+            ->with('SELECT name FROM users WHERE age > :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -657,7 +657,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT user-name AS display_name, email@domain AS contact FROM users WHERE id = :where_0 ')
+            ->with('SELECT user-name AS display_name, email@domain AS contact FROM users WHERE id = :where_0')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -680,7 +680,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT CONCAT(first_name, " ", last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE status = :where_0 AND role = :where_1 ')
+            ->with('SELECT CONCAT(first_name, " ", last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE status = :where_0 AND role = :where_1')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -721,7 +721,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT u.name, u.email, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE u.status = :where_0 GROUP BY u.id ')
+            ->with('SELECT u.name, u.email, COUNT(o.id) as order_count FROM users u LEFT JOIN orders o ON u.id = o.user_id WHERE u.status = :where_0 GROUP BY u.id')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -756,7 +756,7 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     {
         $this->testClass->getPdo()->expects($this->once())
             ->method('prepare')
-            ->with('SELECT u.name, u.email, o.total FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE u.status = :where_0 ORDER BY o.total DESC ')
+            ->with('SELECT u.name, u.email, o.total FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE u.status = :where_0 ORDER BY o.total DESC')
             ->willReturn($this->statement);
 
         $this->statement->expects($this->once())
@@ -949,6 +949,39 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
     }
 
     /**
+     * Test insertIgnore when record already exists (noop case).
+     * When INSERT IGNORE doesn't insert because record exists, rowCount is 0 and status is 'noop'.
+     */
+    public function testInsertIgnoreNoop()
+    {
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('INSERT IGNORE INTO users SET `name` = :set_name, `email` = :set_email, `status` = :set_status')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([':set_name' => 'John Doe', ':set_email' => 'john@example.com', ':set_status' => 'active'])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('rowCount')
+            ->willReturn(0); // Record already exists, so no rows affected
+
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('lastInsertId')
+            ->willReturn('0'); // No new ID since nothing was inserted
+
+        $result = $this->testClass->insertIgnore('users', [
+           'name' => 'John Doe',
+           'email' => 'john@example.com',
+           'status' => 'active'
+        ]);
+
+        $this->assertEquals(['id' => 0, 'rows' => 0, 'status' => 'noop'], $result);
+    }
+
+    /**
      * Test insertOnDuplicateKeyUpdate helper method for ON DUPLICATE KEY UPDATE functionality.
      * Ensures correct SQL and parameter binding.
      */
@@ -984,6 +1017,42 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
         $this->assertEquals(['id' => '1', 'rows' => 1, 'status' => 'inserted'], $result);
     }
 
+    /**
+     * Test insertOnDuplicateKeyUpdate when record exists but values are unchanged (noop case).
+     * When ON DUPLICATE KEY UPDATE doesn't update because values are the same, rowCount is 0 and status is 'noop'.
+     */
+    public function testInsertOnDuplicateKeyUpdateNoop()
+    {
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('INSERT INTO users SET `name` = :set_name, `email` = :set_email, `status` = :set_status ON DUPLICATE KEY UPDATE `name` = :upd_name, `status` = :upd_status')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([':set_name' => 'John Doe', ':set_email' => 'john@example.com', ':set_status' => 'active', ':upd_name' => 'John Doe', ':upd_status' => 'active'])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('rowCount')
+            ->willReturn(0); // Record exists but values unchanged, so no rows affected
+
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('lastInsertId')
+            ->willReturn('0'); // No new ID since nothing was inserted
+
+        $result = $this->testClass->insertOnDuplicateKeyUpdate('users', [
+           'name' => 'John Doe',
+           'email' => 'john@example.com',
+           'status' => 'active'
+        ], [
+           'name' => 'John Doe',
+           'status' => 'active' // Same values, so no update
+        ]);
+
+        $this->assertEquals(['id' => 0, 'rows' => 0, 'status' => 'noop'], $result);
+    }
+
     public function testGetPdoDebugWithFalseStatement()
     {
         // If the statement is false, should return a specific error string
@@ -1003,5 +1072,280 @@ class CommonModelPicoPdoTraitExamplesTest extends TestCase
         // Should capture the output from debugDumpParams
         $result = $this->testClass->getPdoDebug($mockStmt);
         $this->assertEquals('DEBUG_OUTPUT', $result);
+    }
+
+    public function testSelectWithRawSqlInArray()
+    {
+        // Test: ['date > ?'] - raw SQL with ? placeholder in array (numeric key)
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE date > :where_raw_0')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([':where_raw_0' => '2024-01-01'])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['name' => 'John', 'email' => 'john@example.com']
+            ]);
+
+        $users = $this->testClass->selectAll('users', ['name', 'email'],
+            ['date > ?'],
+            ['2024-01-01']
+        );
+
+        $this->assertEquals([
+            ['name' => 'John', 'email' => 'john@example.com']
+        ], $users);
+    }
+
+    public function testSelectWithRawSqlInArrayAndSeparateBindings()
+    {
+        // Test: ['date > ?'], bindings: [$date] - raw SQL in array with separate bindings parameter
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE date > :where_raw_0')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([':where_raw_0' => '2024-01-01'])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['name' => 'John', 'email' => 'john@example.com']
+            ]);
+
+        $users = $this->testClass->selectAll('users', ['name', 'email'],
+            ['date > ?'],
+            ['2024-01-01']
+        );
+
+        $this->assertEquals([
+            ['name' => 'John', 'email' => 'john@example.com']
+        ], $users);
+    }
+
+    public function testSelectWithMixedArrayAndRawSqlWithQuestionMarks()
+    {
+        // Test: ['status' => 'active', 'date > ?'] - mix of key-value and raw SQL with ?
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE `status` = :where_status AND date > :where_raw_0')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([
+                ':where_status' => 'active',
+                ':where_raw_0' => '2024-01-01'
+            ])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['name' => 'John', 'email' => 'john@example.com']
+            ]);
+
+        $users = $this->testClass->selectAll('users', ['name', 'email'],
+            ['status' => 'active', 'date > ?'],
+            ['2024-01-01']
+        );
+
+        $this->assertEquals([
+            ['name' => 'John', 'email' => 'john@example.com']
+        ], $users);
+    }
+
+    public function testSelectWithMultipleRawSqlWithQuestionMarks()
+    {
+        // Test: ['date > ?', 'age < ?'] - multiple raw SQL strings with ? placeholders
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE date > :where_raw_0 AND age < :where_raw_1')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([
+                ':where_raw_0' => '2024-01-01',
+                ':where_raw_1' => 30
+            ])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['name' => 'John', 'email' => 'john@example.com']
+            ]);
+
+        $users = $this->testClass->selectAll('users', ['name', 'email'],
+            ['date > ?', 'age < ?'],
+            ['2024-01-01', 30]
+        );
+
+        $this->assertEquals([
+            ['name' => 'John', 'email' => 'john@example.com']
+        ], $users);
+    }
+
+    public function testUpdateWithRawSqlInArray()
+    {
+        // Test: Update with raw SQL containing ? in array
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('UPDATE users SET `status` = :set_status WHERE date > :where_raw_0')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([
+                ':set_status' => 'active',
+                ':where_raw_0' => '2024-01-01'
+            ])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('rowCount')
+            ->willReturn(1);
+
+        $result = $this->testClass->update('users',
+            ['status' => 'active'],
+            ['date > ?'],
+            ['2024-01-01']
+        );
+
+        $this->assertEquals(1, $result);
+    }
+
+    public function testDeleteWithRawSqlInArray()
+    {
+        // Test: Delete with raw SQL containing ? in array
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('DELETE FROM users WHERE date > :where_raw_0')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([':where_raw_0' => '2024-01-01'])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('rowCount')
+            ->willReturn(1);
+
+        $result = $this->testClass->delete('users',
+            ['date > ?'],
+            ['2024-01-01']
+        );
+
+        $this->assertEquals(1, $result);
+    }
+
+    public function testSelectWithRawSqlAndNamedPlaceholdersMixed()
+    {
+        // Test: Mix of raw SQL with ? and named placeholders
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE `status` = :where_status AND date > :where_raw_0 AND role = :role')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([
+                ':where_status' => 'active',
+                ':where_raw_0' => '2024-01-01',
+                ':role' => 'admin'
+            ])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['name' => 'John', 'email' => 'john@example.com']
+            ]);
+
+        $users = $this->testClass->selectAll('users', ['name', 'email'],
+            ['status' => 'active', 'date > ?', 'role = :role'],
+            ['2024-01-01', ':role' => 'admin']
+        );
+
+        $this->assertEquals([
+            ['name' => 'John', 'email' => 'john@example.com']
+        ], $users);
+    }
+
+    public function testSelectWithKeyContainingQuestionMarkPlaceholder()
+    {
+        // Test: ['date > ?' => $date] - key with ? placeholder (new feature)
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE date > :where_0')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([':where_0' => '2024-01-01'])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['name' => 'John', 'email' => 'john@example.com']
+            ]);
+
+        $users = $this->testClass->selectAll('users', ['name', 'email'],
+            ['date > ?' => '2024-01-01']
+        );
+
+        $this->assertEquals([
+            ['name' => 'John', 'email' => 'john@example.com']
+        ], $users);
+    }
+
+    public function testSelectWithMixedKeyValueAndKeyWithQuestionMark()
+    {
+        // Test: Mix of regular key-value and key with ? placeholder
+        $this->testClass->getPdo()->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE `status` = :where_status AND date > :where_0')
+            ->willReturn($this->statement);
+
+        $this->statement->expects($this->once())
+            ->method('execute')
+            ->with([
+                ':where_status' => 'active',
+                ':where_0' => '2024-01-01'
+            ])
+            ->willReturn(true);
+
+        $this->statement->expects($this->once())
+            ->method('fetchAll')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn([
+                ['name' => 'John', 'email' => 'john@example.com']
+            ]);
+
+        $users = $this->testClass->selectAll('users', ['name', 'email'],
+            ['status' => 'active', 'date > ?' => '2024-01-01']
+        );
+
+        $this->assertEquals([
+            ['name' => 'John', 'email' => 'john@example.com']
+        ], $users);
     }
 } 

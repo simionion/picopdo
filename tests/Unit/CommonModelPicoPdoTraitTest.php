@@ -26,8 +26,12 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         insert as public _testInsert;
         update as public _testUpdate;
         select as public _testSelect;
+        selectOne as public _testSelectOne;
         delete as public _testDelete;
         buildInQuery as public _testBuildInQuery;
+        buildSqlClause as public _testBuildSqlClause;
+        convertToNamedPlaceholders as public _testConvertToNamedPlaceholders;
+        getPdoDebug as public _testGetPdoDebug;
     }
 
     use PHPMock;
@@ -67,6 +71,10 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
                 buildWhereQuery as public;
                 buildInQuery as public;
                 select as public;
+                selectOne as public;
+                buildSqlClause as public;
+                convertToNamedPlaceholders as public;
+                getPdoDebug as public;
             }
             
             public function setPdo(PDO $pdo): void {
@@ -100,13 +108,13 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with($sql)
+            ->with("SELECT * FROM users WHERE id = :nph_0")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
             ->expects($this->once())
             ->method('execute')
-            ->with($params)
+            ->with([':nph_0' => 5])
             ->willReturn(true);
             
         $result = $this->_testPrepExec($sql, $params);
@@ -738,7 +746,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM users  ")
+            ->with("SELECT name, email FROM users")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -763,7 +771,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM users  ")
+            ->with("SELECT name, email FROM users")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -788,7 +796,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM users  ")
+            ->with("SELECT name, email FROM users")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -819,7 +827,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT name, email FROM users  ")
+            ->with("SELECT name, email FROM users")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -853,7 +861,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         ];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  ";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users";
         $expectedParams = $bindings;
 
         $this->pdo
@@ -888,7 +896,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         ];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  ";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users";
         $expectedParams = $bindings;
 
         $this->pdo
@@ -923,7 +931,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         ];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  ";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users";
         $expectedParams = $bindings;
 
         $this->pdo
@@ -959,7 +967,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $where = ['status' => 'active'];
         $bindings = ['report_date' => '2024-01-01'];
 
-        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE `status` = :where_status ";
+        $expectedSql = "SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE `status` = :where_status";
         $expectedParams = array_merge($bindings, [':where_status' => 'active']);
 
         $this->pdo
@@ -991,7 +999,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  ")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1030,7 +1038,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  ")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1069,7 +1077,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users  ")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1108,7 +1116,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE status = :where_0 ")
+            ->with("SELECT CONCAT(first_name, ' ', last_name) AS full_name, TIMESTAMPDIFF(YEAR, birth_date, :report_date) AS age FROM users WHERE status = :where_0")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1157,8 +1165,8 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $bindings = 1;
         [$whereStr, $params] = $this->_testBuildWhereQuery($where, $bindings);
 
-        $this->assertEquals('id = ?', $whereStr);
-        $this->assertEquals([1], $params);
+        $this->assertEquals('id = :where_0', $whereStr);
+        $this->assertEquals([':where_0' => 1], $params);
     }
 
     public function testBuildWhereQueryWithScalarBindingsAndNamedPlaceholders()
@@ -1169,5 +1177,247 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
 
         $this->assertEquals('id = :id', $whereStr);
         $this->assertEquals([1], $params);
+    }
+
+    public function testPrepExecWithLodurTestServerErrorLogging()
+    {
+        // Define LODUR_TEST_SERVER constant to trigger error logging path
+        if (!defined('LODUR_TEST_SERVER')) {
+            define('LODUR_TEST_SERVER', true);
+        }
+
+        // Create mock for error_log function
+        $errorLogMock = $this->getFunctionMock('Lodur\PicoPdo', 'error_log');
+        $errorLogMock->expects($this->atLeastOnce())
+            ->willReturnCallback(function($message) {
+                // Verify error log is called with expected format
+                $this->assertStringContainsString('<br><b>', $message);
+            });
+
+        // Mock PDO to throw exception
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->willThrowException(new PDOException('Test error'));
+
+        $this->expectException(PDOException::class);
+        $this->expectExceptionMessage('Test error');
+
+        $this->_testPrepExec('SELECT * FROM users WHERE id = ?', [1]);
+    }
+
+    public function testBuildInQueryWithLodurTestServerErrorLogging()
+    {
+        // Define LODUR_TEST_SERVER constant to trigger error logging path
+        if (!defined('LODUR_TEST_SERVER')) {
+            define('LODUR_TEST_SERVER', true);
+        }
+
+        // Create mock for error_log function
+        $errorLogMock = $this->getFunctionMock('Lodur\PicoPdo', 'error_log');
+        $errorLogMock->expects($this->once())
+            ->with($this->stringContains('Provided array for IN clause is empty or key is numeric'));
+
+        // Test with numeric key (should trigger error log)
+        $sql = "SELECT * FROM users WHERE id IN (?)";
+        $params = [0 => [1, 2, 3]]; // Numeric key
+
+        [$newSql, $newParams] = $this->_testBuildInQuery($sql, $params);
+
+        // Should not modify SQL or params since numeric keys are skipped
+        $this->assertEquals($sql, $newSql);
+        $this->assertEquals([], $newParams);
+    }
+
+    public function testBuildInQueryWithEmptyArray()
+    {
+        // Define LODUR_TEST_SERVER constant to trigger error logging path
+        if (!defined('LODUR_TEST_SERVER')) {
+            define('LODUR_TEST_SERVER', true);
+        }
+
+        // Create mock for error_log function
+        $errorLogMock = $this->getFunctionMock('Lodur\PicoPdo', 'error_log');
+        $errorLogMock->expects($this->once())
+            ->with($this->stringContains('Provided array for IN clause is empty or key is numeric'));
+
+        // Test with empty array (should trigger error log)
+        $sql = "SELECT * FROM users WHERE id IN (:ids)";
+        $params = [':ids' => []]; // Empty array
+
+        [$newSql, $newParams] = $this->_testBuildInQuery($sql, $params);
+
+        // Should not modify SQL or params since empty arrays are skipped
+        $this->assertEquals($sql, $newSql);
+        $this->assertEquals([], $newParams);
+    }
+
+    public function testSelectOneWithEmptyResult()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE `id` = :where_id LIMIT 1')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_id' => 999])
+            ->willReturn(true);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetch')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn(false); // No result found
+
+        // Set PDO on trait instance
+        $this->trait->setPdo($this->pdo);
+        
+        $result = $this->_testSelectOne('users', ['name', 'email'], ['id' => 999]);
+
+        // Should return empty array when fetch returns false
+        $this->assertEquals([], $result);
+    }
+
+    public function testSelectOneWithResult()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE `id` = :where_id LIMIT 1')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_id' => 1])
+            ->willReturn(true);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetch')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn(['name' => 'John Doe', 'email' => 'john@example.com']);
+
+        // Set PDO on trait instance
+        $this->trait->setPdo($this->pdo);
+        
+        $result = $this->_testSelectOne('users', ['name', 'email'], ['id' => 1]);
+
+        $this->assertEquals(['name' => 'John Doe', 'email' => 'john@example.com'], $result);
+    }
+
+    public function testSelectOneWithExtraQuerySuffix()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT name, email FROM users WHERE `id` = :where_id ORDER BY name LIMIT 1')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_id' => 1])
+            ->willReturn(true);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('fetch')
+            ->with(PDO::FETCH_ASSOC)
+            ->willReturn(['name' => 'John Doe', 'email' => 'john@example.com']);
+
+        // Set PDO on trait instance
+        $this->trait->setPdo($this->pdo);
+        
+        $result = $this->_testSelectOne('users', ['name', 'email'], ['id' => 1], null, 'ORDER BY name');
+
+        $this->assertEquals(['name' => 'John Doe', 'email' => 'john@example.com'], $result);
+    }
+
+    public function testGetPdoDebugWithEmptyOutput()
+    {
+        // Mock PDOStatement that returns empty string from debugDumpParams
+        $mockStmt = $this->createMock(PDOStatement::class);
+        $mockStmt->expects($this->once())
+            ->method('debugDumpParams')
+            ->willReturnCallback(function() {
+                // Don't output anything, simulating empty output
+            });
+
+        $result = $this->_testGetPdoDebug($mockStmt);
+
+        // Should return empty string when ob_get_clean returns empty
+        $this->assertEquals('', $result);
+    }
+
+    public function testBuildSqlClauseWithKeyValuePairs()
+    {
+        $data = ['name' => 'John', 'email' => 'john@example.com'];
+        [$sql, $params] = $this->_testBuildSqlClause($data, 'set_');
+
+        $this->assertEquals('`name` = :set_name, `email` = :set_email', $sql);
+        $this->assertEquals([':set_name' => 'John', ':set_email' => 'john@example.com'], $params);
+    }
+
+    public function testBuildSqlClauseWithRawSql()
+    {
+        $data = ['name' => 'John', 'created_at = NOW()'];
+        [$sql, $params] = $this->_testBuildSqlClause($data, 'set_');
+
+        $this->assertStringContainsString('`name` = :set_name', $sql);
+        $this->assertStringContainsString('created_at = NOW()', $sql);
+        $this->assertEquals([':set_name' => 'John'], $params);
+    }
+
+    public function testBuildSqlClauseWithQuestionMarkPlaceholder()
+    {
+        $data = ['name' => 'John', 'last_login > ?' => '2024-01-01'];
+        [$sql, $params] = $this->_testBuildSqlClause($data, 'update_');
+
+        $this->assertStringContainsString('`name` = :update_name', $sql);
+        $this->assertStringContainsString('last_login > :update_0', $sql);
+        $this->assertEquals([':update_name' => 'John', ':update_0' => '2024-01-01'], $params);
+    }
+
+    public function testBuildSqlClauseWithCustomJoiner()
+    {
+        $data = ['name' => 'John', 'email' => 'john@example.com'];
+        [$sql, $params] = $this->_testBuildSqlClause($data, 'where_', ' AND ');
+
+        $this->assertEquals('`name` = :where_name AND `email` = :where_email', $sql);
+        $this->assertEquals([':where_name' => 'John', ':where_email' => 'john@example.com'], $params);
+    }
+
+    public function testConvertToNamedPlaceholders()
+    {
+        $query = 'SELECT * FROM users WHERE id = ? AND name = ?';
+        $bindings = [1, 'John'];
+        [$newQuery, $newBindings] = $this->_testConvertToNamedPlaceholders($query, $bindings, 'where_');
+
+        $this->assertEquals('SELECT * FROM users WHERE id = :where_0 AND name = :where_1', $newQuery);
+        $this->assertEquals([':where_0' => 1, ':where_1' => 'John'], $newBindings);
+    }
+
+    public function testConvertToNamedPlaceholdersWithNoPlaceholders()
+    {
+        $query = 'SELECT * FROM users WHERE id = :id';
+        $bindings = [':id' => 1];
+        [$newQuery, $newBindings] = $this->_testConvertToNamedPlaceholders($query, $bindings, 'where_');
+
+        $this->assertEquals('SELECT * FROM users WHERE id = :id', $newQuery);
+        $this->assertEquals([':id' => 1], $newBindings);
+    }
+
+    public function testConvertToNamedPlaceholdersWithMixedPlaceholders()
+    {
+        $query = 'SELECT * FROM users WHERE id = :id AND name = ? AND status = ?';
+        $bindings = [':id' => 1, 'John', 'active'];
+        [$newQuery, $newBindings] = $this->_testConvertToNamedPlaceholders($query, $bindings, 'where_');
+
+        $this->assertEquals('SELECT * FROM users WHERE id = :id AND name = :where_0 AND status = :where_1', $newQuery);
+        $this->assertEquals([':id' => 1, ':where_0' => 'John', ':where_1' => 'active'], $newBindings);
     }
 }
