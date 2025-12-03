@@ -4,12 +4,13 @@ A lightweight PDO trait for PHP models that provides common database operations 
 
 ## Features
 
-- **Secure, parameterized queries** with automatic `?` to named placeholder conversion
-- **Array-expansion for `IN` clauses** - supports both `IN (:ids)` and `IN (?)` syntax
-- **Flexible WHERE clause building** - supports arrays, raw SQL, mixed placeholders
-- **Simplified methods** for SELECT, INSERT, UPDATE, DELETE, and EXISTS operations
+- **Automatic `?` to named placeholder conversion** - All positional placeholders are converted to named placeholders
+- **Array-expansion for `IN` clauses** - Supports both `IN (:ids)` and `IN (?)` syntax
+- **Flexible WHERE clause building** - Arrays, raw SQL, mixed placeholders all supported
+- **Raw SQL in arrays** - Use numeric keys for raw SQL strings
+- **Keys with `?` placeholders** - Direct binding syntax: `['date > ?' => $date]`
 - **INSERT modes** - INSERT, REPLACE, INSERT IGNORE, ON DUPLICATE KEY UPDATE
-- **Automatic parameter binding** and error handling
+- **JOIN support** - `selectJoin()` method for complex queries
 - **100% test coverage** across unit and integration tests
 
 ## Requirements
@@ -17,67 +18,20 @@ A lightweight PDO trait for PHP models that provides common database operations 
 - PHP 8.2 or higher
 - PDO PHP extension
 - MariaDB/MySQL
-- Xdebug (for code coverage reports)
 
 ## Installation
 
-1. Clone the repository:
 ```bash
 git clone https://github.com/simionion/picopdo.git
 cd picopdo
-```
-
-2. Install dependencies:
-```bash
 make install
 ```
 
 ## Development Setup
 
-1. Build and start the Docker containers:
 ```bash
-make start
-```
-
-2. Run tests with coverage report:
-```bash
-make test
-```
-
-## Available Make Commands
-
-- `make build` - Build Docker containers
-- `make up` - Start containers
-- `make down` - Stop containers
-- `make start` - Build, start containers, and install dependencies
-- `make test` - Run PHPUnit tests with text coverage report
-- `make test-coverage` - Run PHPUnit tests with HTML coverage report (generates `coverage/` directory)
-- `make install` - Install Composer dependencies
-- `make clean` - Clean up Docker volumes and vendor directory
-- `make logs` - Show container logs
-
-## Testing
-
-The project includes both unit and integration tests with comprehensive code coverage:
-
-- **Unit tests** (`tests/Unit/`) - Test individual methods using mocks
-- **Integration tests** (`tests/Integration/`) - Test against a real database
-
-Current test coverage:
-- Classes: 100.00% (1/1)
-- Methods: 100.00% (16/16)
-- Lines: 100.00% (125/125)
-
-To run specific test suites:
-```bash
-# Run unit tests only
-docker-compose exec app vendor/bin/phpunit --testsuite Unit
-
-# Run integration tests only
-docker-compose exec app vendor/bin/phpunit --testsuite Integration
-
-# Run tests with HTML coverage report
-make test-coverage
+make start    # Build, start containers, and install dependencies
+make test     # Run tests with coverage report
 ```
 
 ## Usage
@@ -96,389 +50,227 @@ class UserModel
         $this->pdo = $pdo;
     }
 }
-
-$userModel = new UserModel($pdo);
 ```
 
-### INSERT Operations
+## Key Features
 
-#### Basic Insert
+### 1. Automatic `?` to Named Placeholder Conversion
+
+All `?` placeholders are automatically converted to named placeholders:
+
 ```php
-$id = $userModel->insert('users', [
-    'name' => 'John Doe',
-    'email' => 'john@example.com',
-    'status' => 'active'
+// You write:
+$users = $model->selectAll('users', null, 'email = ? AND status = ?', ['user@example.com', 'active']);
+
+// Generates: WHERE email = :where_0 AND status = :where_1
+```
+
+### 2. Array-Expansion for `IN` Clauses
+
+Two syntaxes supported:
+
+```php
+// Named placeholder (original)
+$users = $model->selectAll('users', null, 'id IN (:ids)', [':ids' => [1, 2, 3]]);
+// Expands to: id IN (:ids0, :ids1, :ids2)
+
+// Positional placeholder (new)
+$users = $model->selectAll('users', null, 'id IN (?)', [[1, 2, 3]]);
+// Expands to: id IN (:where_00, :where_01, :where_02)
+```
+
+### 3. Flexible WHERE Clause Building
+
+**Arrays with raw SQL (numeric keys):**
+```php
+$users = $model->selectAll('users', null, [
+    'status' => 'active',
+    'email_verified != 0',        // Raw SQL (numeric key)
+    'created_at > :date'          // Raw SQL with named placeholder
+], [':date' => '2024-01-01']);
+```
+
+**Keys with `?` placeholders:**
+```php
+$users = $model->selectAll('users', null, [
+    'status' => 'active',
+    'date > ?' => '2024-01-01'    // Key contains ?, value is binding
 ]);
-// Returns: Inserted record ID or 0 if failed
+// Generates: WHERE `status` = :where_status AND date > :where_0
 ```
 
-#### Insert with Raw SQL
+**Mixed placeholders:**
 ```php
-$id = $userModel->insert('users', [
-    'name' => 'John Doe',
-    'created_at = NOW()',  // Raw SQL
-    'uuid = UUID()'        // Raw SQL
-]);
+$users = $model->selectAll('users', null,
+    'status = :status AND id > ?',
+    [':status' => 'active', 5]
+);
+// Generates: WHERE status = :status AND id > :where_0
 ```
 
-#### Insert with Meta Information
-```php
-$result = $userModel->insert('users', [
-    'name' => 'John Doe',
-    'email' => 'john@example.com'
-], ['meta' => true]);
-// Returns: ['id' => 123, 'rows' => 1, 'status' => 'inserted']
-```
+### 4. INSERT Modes
 
-#### REPLACE INTO
 ```php
-$id = $userModel->insertReplace('users', [
-    'name' => 'John Doe',
-    'email' => 'john@example.com'
-]);
-```
+// Basic INSERT
+$id = $model->insert('users', ['name' => 'John', 'email' => 'john@example.com']);
 
-#### INSERT IGNORE
-```php
-$result = $userModel->insertIgnore('users', [
-    'name' => 'John Doe',
-    'email' => 'john@example.com'
-]);
+// REPLACE INTO
+$id = $model->insertReplace('users', ['name' => 'John', 'email' => 'john@example.com']);
+
+// INSERT IGNORE
+$result = $model->insertIgnore('users', ['name' => 'John', 'email' => 'john@example.com']);
 // Returns: ['id' => 123|0, 'rows' => 1|0, 'status' => 'inserted'|'noop']
-```
 
-#### INSERT ... ON DUPLICATE KEY UPDATE
-```php
-$result = $userModel->insertOnDuplicateKeyUpdate('users', 
-    ['name' => 'John Doe', 'email' => 'john@example.com'],
-    ['name' => 'John Doe', 'status' => 'active']  // Update values
+// ON DUPLICATE KEY UPDATE
+$result = $model->insertOnDuplicateKeyUpdate('users',
+    ['name' => 'John', 'email' => 'john@example.com'],
+    ['name' => 'John', 'status' => 'active']  // Update values
 );
 // Returns: ['id' => 123|0, 'rows' => 1|2|0, 'status' => 'inserted'|'updated'|'noop']
 ```
 
-### SELECT Operations
+### 5. JOIN Support
 
-#### Select One Record (Classic Key-Value)
 ```php
-$user = $userModel->selectOne('users', ['name', 'email'], 'id', 1);
-// Generates: SELECT name, email FROM users WHERE `id` = :where_id LIMIT 1
-```
-
-#### Select One Record (Associative Array)
-```php
-$user = $userModel->selectOne('users', ['name', 'email'], [
-    'id' => 1,
-    'status' => 'active'
-]);
-// Generates: SELECT name, email FROM users WHERE `id` = :where_id AND `status` = :where_status LIMIT 1
-```
-
-#### Select All Records (Simple Conditions)
-```php
-$users = $userModel->selectAll('users', ['name', 'email'], [
-    'status' => 'active',
-    'email_verified' => 1
-]);
-```
-
-#### Select with Raw SQL in Array
-```php
-$users = $userModel->selectAll('users', ['name', 'email'], [
-    'status' => 'active',
-    'email_verified != 0',           // Raw SQL (numeric key)
-    'created_at > :date'              // Raw SQL with named placeholder
-], [':date' => '2024-01-01']);
-// Generates: SELECT name, email FROM users WHERE `status` = :where_status AND email_verified != 0 AND created_at > :date
-```
-
-#### Select with `?` Placeholders (Auto-converted to Named)
-```php
-$users = $userModel->selectAll('users', ['name', 'email'], 
-    'email = ? AND created_at > ?',
-    ['user@example.com', '2024-01-01']
+$stmt = $model->selectJoin(
+    'users u',
+    ['u.id', 'u.name', 'p.bio'],
+    'LEFT JOIN profiles p ON p.user_id = u.id',
+    ['u.id' => 1]
 );
-// Generates: SELECT name, email FROM users WHERE email = :where_0 AND created_at > :where_1
-// Parameters: [':where_0' => 'user@example.com', ':where_1' => '2024-01-01']
+
+// Multiple JOINs
+$joins = [
+    'LEFT JOIN profiles p ON p.user_id = u.id',
+    'LEFT JOIN addresses a ON a.user_id = u.id'
+];
+$stmt = $model->selectJoin('users u', ['u.*', 'p.bio', 'a.address'], $joins, 'u.status = ?', ['active']);
 ```
 
-#### Select with Mixed Placeholders
+## Common Operations
+
+### SELECT
+
 ```php
-$users = $userModel->selectAll('users', ['name', 'email'],
-    'status = :status AND id > ?',
-    [':status' => 'active', 5]
-);
-// Generates: SELECT name, email FROM users WHERE status = :status AND id > :where_0
+// Simple
+$user = $model->selectOne('users', ['name', 'email'], 'id', 1);
+$users = $model->selectAll('users', ['name', 'email'], ['status' => 'active']);
+
+// With extra query suffix
+$users = $model->selectAll('users', ['name'], ['status' => 'active'], null, 'ORDER BY name LIMIT 10');
 ```
 
-#### Select with `IN (:ids)` (Named Placeholder)
-```php
-$users = $userModel->selectAll('users', ['name', 'email'],
-    'id IN (:ids)',
-    [':ids' => [1, 2, 3]]
-);
-// Generates: SELECT name, email FROM users WHERE id IN (:ids0, :ids1, :ids2)
-// Parameters: [':ids0' => 1, ':ids1' => 2, ':ids2' => 3]
-```
+### UPDATE
 
-#### Select with `IN (?)` (Positional Placeholder - New Feature!)
 ```php
-$users = $userModel->selectAll('users', ['name', 'email'],
-    'id IN (?)',
-    [[1, 2, 3]]  // Note: Array wrapped in array
-);
-// Generates: SELECT name, email FROM users WHERE id IN (:where_00, :where_01, :where_02)
-// Parameters: [':where_00' => 1, ':where_01' => 2, ':where_02' => 3]
-```
+// Simple
+$affected = $model->update('users', ['name' => 'John'], 'id', 1);
 
-#### Select with Key Containing `?` Placeholder
-```php
-$users = $userModel->selectAll('users', ['name', 'email'], [
-    'status' => 'active',
-    'date > ?' => '2024-01-01'  // Key with ? placeholder
-]);
-// Generates: SELECT name, email FROM users WHERE `status` = :where_status AND date > :where_0
-```
-
-#### Select with Complex Conditions
-```php
-$users = $userModel->selectAll('users', ['name', 'email'],
-    'status = :status AND role IN (:roles) AND created_at < NOW() AND email LIKE :email AND age > :age',
-    [
-        ':status' => 'active',
-        ':roles' => ['admin', 'moderator'],
-        ':email' => '%@example.com',
-        ':age' => 18
-    ]
-);
-// Generates: SELECT name, email FROM users WHERE status = :status AND role IN (:roles0,:roles1) AND created_at < NOW() AND email LIKE :email AND age > :age
-```
-
-#### Select with Extra Query Suffix
-```php
-$users = $userModel->selectAll('users', ['name'],
-    ['status' => 'active'],
-    null,
-    'ORDER BY name ASC LIMIT 10'
-);
-```
-
-### UPDATE Operations
-
-#### Basic Update
-```php
-$affected = $userModel->update('users', 
-    ['name' => 'John Doe'],
-    'id',
-    1
-);
-// Returns: Number of affected rows
-```
-
-#### Update with Raw SQL in Data
-```php
-$affected = $userModel->update('users', 
+// With raw SQL
+$affected = $model->update('users', 
     ['name' => 'John', 'status = "inactive"'],  // Raw SQL for status
-    'id',
-    1
+    'id', 1
 );
 ```
 
-#### Update with Array WHERE
+### DELETE
+
 ```php
-$affected = $userModel->update('users',
-    ['status' => 'inactive'],
-    ['id' => 1, 'active' => 1]
-);
+$affected = $model->delete('users', 'id', 1);
+$affected = $model->delete('users', ['status' => 'inactive', 'email_verified' => 0]);
 ```
 
-#### Update with Raw SQL in WHERE Array
+### EXISTS
+
 ```php
-$affected = $userModel->update('users',
-    ['status' => 'active'],
-    ['id' => 1, 'email_verified != 0', 'created_at > :date'],
-    [':date' => '2024-01-01']
-);
+$exists = $model->exists('users', 'id', 1);
+$exists = $model->exists('users', ['email' => 'john@example.com', 'status' => 'active']);
 ```
 
-#### Update with `?` Placeholders
-```php
-$affected = $userModel->update('users',
-    ['name' => 'John'],
-    'email = ? OR status = ?',
-    ['john@example.com', 'active']
-);
-// Generates: UPDATE users SET `name` = :set_name WHERE email = :where_0 OR status = :where_1
-```
+## Complex Example: All Features Combined
 
-#### Update with `IN (?)` Syntax
-```php
-$affected = $userModel->update('users',
-    ['status' => 'inactive'],
-    'id IN (?)',
-    [[1, 2, 3]]
-);
-```
-
-### DELETE Operations
-
-#### Basic Delete
-```php
-$affected = $userModel->delete('users', 'id', 1);
-```
-
-#### Delete with Array WHERE
-```php
-$affected = $userModel->delete('users', [
-    'status' => 'inactive',
-    'email_verified' => 0
-]);
-```
-
-#### Delete with Raw SQL in WHERE
-```php
-$affected = $userModel->delete('users',
-    ['status' => 'inactive', 'email_verified != 0', 'created_at > :date'],
-    [':date' => '2024-01-01']
-);
-```
-
-#### Delete with `?` Placeholders
-```php
-$affected = $userModel->delete('users',
-    'last_login < ? AND status != ?',
-    ['2023-01-01', 'active']
-);
-// Generates: DELETE FROM users WHERE last_login < :where_0 AND status != :where_1
-```
-
-#### Delete with `IN (:ids)`
-```php
-$affected = $userModel->delete('users',
-    'id IN (:ids)',
-    [':ids' => [1, 2, 3]]
-);
-```
-
-### EXISTS Operations
-
-#### Basic Exists
-```php
-$exists = $userModel->exists('users', 'id', 1);
-```
-
-#### Exists with Array WHERE
-```php
-$exists = $userModel->exists('users', [
-    'email' => 'john@example.com',
-    'status' => 'active'
-]);
-```
-
-#### Exists with Raw SQL
-```php
-$exists = $userModel->exists('users',
-    ['status' => 'active', 'email_verified != 0', 'created_at > :date'],
-    [':date' => '2024-01-01']
-);
-```
-
-#### Exists with `?` Placeholders
-```php
-$exists = $userModel->exists('users',
-    'email = ? AND created_at > ?',
-    ['user@example.com', '2024-01-01']
-);
-```
-
-#### Exists with `IN (?)`
-```php
-$exists = $userModel->exists('users',
-    'id IN (?)',
-    [[1, 2, 3]]
-);
-```
-
-### Advanced: Direct SQL Execution
-
-For complex queries, use `prepExec()` directly:
+Here's a comprehensive example showcasing all features together:
 
 ```php
-// Simple query
-$stmt = $userModel->prepExec(
-    'SELECT u.name, u.email, o.order_id, o.total 
-     FROM users u 
-     JOIN orders o ON u.id = o.user_id 
-     WHERE u.status = :status AND o.created_at > :date',
+// Complex query with JOINs, flexible WHERE, IN clauses, raw SQL, and sqlTail with bindings
+$stmt = $model->selectJoin(
+    'users u',
     [
-        ':status' => 'active',
-        ':date' => '2024-01-01'
-    ]
+        'u.id',
+        'u.name',
+        'u.email',
+        'p.bio',
+        'COUNT(o.id) AS order_count',
+        'SUM(o.total) AS total_spent'
+    ],
+    [
+        'LEFT JOIN profiles p ON p.user_id = u.id',
+        'LEFT JOIN orders o ON o.user_id = u.id'
+    ],
+    [
+        'u.status' => 'active',                    // Key with dot - sanitized to :where_u_status
+        'u.name != ""',                            // Raw SQL (numeric key)
+        'u.created_at > :min_date',                 // Raw SQL with named placeholder
+        'u.created_at < ?' => $maxLastLogin,        // Key with ? placeholder
+        'u.id IN (:user_ids)'                       // IN clause with named placeholder (raw SQL)
+    ],
+    [
+        ':min_date' => '2024-01-01',
+        ':user_ids' => [1, 2, 3],                   // Will expand to :user_ids0, :user_ids1, :user_ids2
+        ':min_spent' => 1000                        // For HAVING clause in sqlTail
+    ],
+    'GROUP BY u.id HAVING total_spent > :min_spent ORDER BY total_spent DESC LIMIT 10'
 );
+
 $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ```
 
-#### prepExec with IN Clause (Named Placeholder)
+## Limitations
+
+### Literal `?` Characters in Raw SQL
+
+The `?` character is **always** treated as a placeholder and will be converted to a named placeholder, even when used as a literal character in SQL strings (e.g., in `LIKE` patterns).
+
+**Problematic:**
 ```php
-$stmt = $userModel->prepExec(
-    'SELECT u.name, COUNT(o.order_id) as order_count 
-     FROM users u 
-     LEFT JOIN orders o ON u.id = o.user_id 
-     WHERE u.role IN (:roles) AND o.status = :status 
-     GROUP BY u.id',
-    [
-        ':roles' => ['admin', 'moderator'],  // Will be expanded to :roles0,:roles1
-        ':status' => 'completed'
-    ]
-);
-$results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+// ❌ The ? in LIKE pattern will be converted to a placeholder
+$users = $model->selectAll('users', null, ["name LIKE '%Marc?'"]);
+// The ? becomes :where_raw_0, causing a binding mismatch
+
+// ❌ Also problematic in string WHERE clauses
+$users = $model->selectAll('users', null, "name LIKE '%Marc?' AND status = ?", ['active']);
+// Both ? characters are converted, but only one binding is provided
 ```
 
-## Key Features Explained
+**Solutions:**
+```php
+// ✅ Put the pattern with literal ? in the bindings array, not in the SQL string
+$pattern = '%Marc?';
+$users = $model->selectAll('users', null, "name LIKE ? AND status = ?", 
+    [$pattern, 'active']);
+// The trait converts both ? to named placeholders, and the literal ? stays in the binding value
 
-### Automatic Placeholder Conversion
+// ✅ Same approach for raw SQL in arrays
+$pattern = '%Marc?';
+$users = $model->selectAll('users', null, ["name LIKE ?", "status = ?"], 
+    [$pattern, 'active']);
+```
 
-All `?` placeholders are automatically converted to named placeholders for consistency and better debugging:
+**Note:** Named placeholders (`:name`) are only matched when they exist in the bindings array and use word boundaries, so literal `:` characters in raw SQL strings are safe. Only `?` characters have this limitation.
 
-- `?` → `:where_0`, `:where_1`, etc. (in WHERE clauses)
-- `?` → `:set_0`, `:set_1`, etc. (in SET clauses)
-- `?` → `:where_raw_0`, `:where_raw_1`, etc. (in raw SQL strings within arrays)
+## Testing
 
-### Array Format Rules
+Current test coverage:
+- **196 tests** (135 unit tests, 61 integration tests)
+- **596 assertions**
+- Classes: 100.00% (1/1)
+- Methods: 100.00% (17/17)
+- Lines: 100.00% (133/133)
 
-When using arrays for WHERE clauses or data:
-
-- **Numeric keys**: Treated as raw SQL strings
-  ```php
-  ['status' => 'active', 'email_verified != 0']  // 'email_verified != 0' is raw SQL
-  ```
-
-- **String keys with `?`**: Treated as SQL with placeholder
-  ```php
-  ['date > ?' => '2024-01-01']  // Key contains ?, value is binding
-  ```
-
-- **String keys without `?`**: Treated as column-value pairs
-  ```php
-  ['status' => 'active']  // Column = value
-  ```
-
-- **Keys starting with `:`**: Ignored (placeholders should be in `$bindings` parameter)
-
-### IN Clause Support
-
-Two syntaxes are supported for `IN` clauses:
-
-1. **Named placeholder** (original):
-   ```php
-   'id IN (:ids)', [':ids' => [1, 2, 3]]
-   // Expands to: id IN (:ids0, :ids1, :ids2)
-   ```
-
-2. **Positional placeholder** (new):
-   ```php
-   'id IN (?)', [[1, 2, 3]]  // Note: Array wrapped in array
-   // Expands to: id IN (:where_00, :where_01, :where_02)
-   ```
+```bash
+make test              # Run all tests
+make test-coverage     # Generate HTML coverage report
+```
 
 ## License
 

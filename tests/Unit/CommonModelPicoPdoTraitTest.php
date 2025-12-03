@@ -27,6 +27,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         update as public _testUpdate;
         select as public _testSelect;
         selectOne as public _testSelectOne;
+        selectJoin as public _testSelectJoin;
         delete as public _testDelete;
         buildInQuery as public _testBuildInQuery;
         buildSqlClause as public _testBuildSqlClause;
@@ -72,6 +73,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
                 buildInQuery as public;
                 select as public;
                 selectOne as public;
+                selectJoin as public;
                 buildSqlClause as public;
                 convertToNamedPlaceholders as public;
                 getPdoDebug as public;
@@ -319,7 +321,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT 1 as `true` FROM users  LIMIT 1")
+            ->with("SELECT 1 as `true` FROM users LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -345,7 +347,7 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->pdo
             ->expects($this->once())
             ->method('prepare')
-            ->with("SELECT 1 as `true` FROM users  LIMIT 1")
+            ->with("SELECT 1 as `true` FROM users LIMIT 1")
             ->willReturn($this->pdoStatement);
             
         $this->pdoStatement
@@ -1420,4 +1422,538 @@ class CommonModelPicoPdoTraitTest extends MockeryTestCase
         $this->assertEquals('SELECT * FROM users WHERE id = :id AND name = :where_0 AND status = :where_1', $newQuery);
         $this->assertEquals([':id' => 1, ':where_0' => 'John', ':where_1' => 'active'], $newBindings);
     }
+
+    // ========== selectJoin Tests ==========
+
+    public function testSelectJoinBasic()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin('users u', null, 'LEFT JOIN profiles p ON p.user_id = u.id');
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithColumns()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT u.id, u.name, p.bio FROM users u LEFT JOIN profiles p ON p.user_id = u.id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            ['u.id', 'u.name', 'p.bio'],
+            'LEFT JOIN profiles p ON p.user_id = u.id'
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithMultipleJoinsAsString()
+    {
+        $joins = "LEFT JOIN profiles p ON p.user_id = u.id LEFT JOIN addresses a ON a.user_id = u.id";
+        
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id LEFT JOIN addresses a ON a.user_id = u.id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin('users u', null, $joins);
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithMultipleJoinsAsArray()
+    {
+        $joins = [
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            'LEFT JOIN addresses a ON a.user_id = u.id'
+        ];
+        
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id LEFT JOIN addresses a ON a.user_id = u.id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin('users u', null, $joins);
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithWhereKeyValue()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id = :where_u_id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_u_id' => 1])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            ['u.id' => 1]
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithWhereArray()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id = :where_u_id AND p.status = :where_p_status')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_u_id' => 1, ':where_p_status' => 'active'])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            ['u.id' => 1, 'p.status' => 'active']
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithWhereStringAndBindings()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id = :where_0 AND p.status = :where_1')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_0' => 1, ':where_1' => 'active'])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            'u.id = ? AND p.status = ?',
+            [1, 'active']
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithWhereStringAndNamedBindings()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id = :id AND p.status = :status')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':id' => 1, ':status' => 'active'])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            'u.id = :id AND p.status = :status',
+            [':id' => 1, ':status' => 'active']
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithSqlTail()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id ORDER BY u.name LIMIT 10')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            null,
+            null,
+            'ORDER BY u.name LIMIT 10'
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithWhereAndSqlTail()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT u.id, u.name FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.status = :where_u_status ORDER BY u.name LIMIT 10')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_u_status' => 'active'])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            ['u.id', 'u.name'],
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            ['u.status' => 'active'],
+            null,
+            'ORDER BY u.name LIMIT 10'
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithNullJoins()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u WHERE u.id = :where_u_id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_u_id' => 1])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            null,
+            ['u.id' => 1]
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithEmptyJoins()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u WHERE u.id = :where_u_id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_u_id' => 1])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            '',
+            ['u.id' => 1]
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithEmptyJoinsArray()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u WHERE u.id = :where_u_id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_u_id' => 1])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            [],
+            ['u.id' => 1]
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithInClause()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id IN (:ids0,:ids1,:ids2)')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':ids0' => 1, ':ids1' => 2, ':ids2' => 3])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            'u.id IN (:ids)',
+            [':ids' => [1, 2, 3]]
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithQuestionMarkPlaceholderInWhere()
+    {
+        // When using ? placeholder with array, it gets converted to named placeholder
+        // and then buildInQuery expands it into multiple placeholders
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.id IN (:where_00,:where_01,:where_02)')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_00' => 1, ':where_01' => 2, ':where_02' => 3])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            'u.id IN (?)',
+            [[1, 2, 3]]
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithRawSqlInWhere()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id WHERE u.created_at > :where_raw_0')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':where_raw_0' => '2024-01-01'])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            ['u.created_at > ?'],
+            ['2024-01-01']
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithColumnString()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT u.id, u.name FROM users u LEFT JOIN profiles p ON p.user_id = u.id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            'u.id, u.name',
+            'LEFT JOIN profiles p ON p.user_id = u.id'
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithNullWhere()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            null
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithEmptyWhere()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            'LEFT JOIN profiles p ON p.user_id = u.id',
+            []
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithBindingInJoinClause()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN orders o ON o.user_id = u.id AND o.total > :join_0 WHERE u.status = :where_u_status')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':join_0' => 100, ':where_u_status' => 'active'])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            [
+                'LEFT JOIN orders o ON o.user_id = u.id AND o.total > ?' => 100
+            ],
+            ['u.status' => 'active']
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
+    public function testSelectJoinWithMultipleBindingsInJoinClauses()
+    {
+        $this->pdo
+            ->expects($this->once())
+            ->method('prepare')
+            ->with('SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id AND p.verified = :join_0 LEFT JOIN orders o ON o.user_id = u.id AND o.total > :join_1 WHERE u.status = :where_u_status')
+            ->willReturn($this->pdoStatement);
+
+        $this->pdoStatement
+            ->expects($this->once())
+            ->method('execute')
+            ->with([':join_0' => 1, ':join_1' => 100, ':where_u_status' => 'active'])
+            ->willReturn(true);
+
+        $this->trait->setPdo($this->pdo);
+
+        $stmt = $this->_testSelectJoin(
+            'users u',
+            null,
+            [
+                'LEFT JOIN profiles p ON p.user_id = u.id AND p.verified = ?' => 1,
+                'LEFT JOIN orders o ON o.user_id = u.id AND o.total > ?' => 100
+            ],
+            ['u.status' => 'active']
+        );
+        $this->assertInstanceOf(PDOStatement::class, $stmt);
+    }
+
 }
