@@ -33,6 +33,10 @@ use PDOStatement;
  *
  * @author Ion Simion
  * @repository https://github.com/simionion/picopdo
+ *
+ * @phpstan-type BindingsMap array<string|int, mixed>
+ * @phpstan-type DataMap array<string|int, mixed>
+ * @phpstan-type WhereInput string|array<string|int, mixed>|null
  */
 trait CommonModelPicoPdoTrait
 {
@@ -59,7 +63,7 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $sql The SQL query.
-     * @param array<int|string, mixed>|string|int|null $params
+     * @param BindingsMap|string|int|null $params
      * @return PDOStatement The executed statement.
      * @throws PDOException If the query fails to execute.
      */
@@ -73,15 +77,27 @@ trait CommonModelPicoPdoTrait
 
         try {
             $stmt = $this->pdo->prepare($sql);
-            $stmt->execute($params);
+
+            foreach ($params as $key => $value) {
+                $paramId = is_int($key) ? $key + 1 : ':' . ltrim($key, ':');
+                $stmt->bindValue($paramId, $value, match (true) {
+                    is_int($value)  => PDO::PARAM_INT,
+                    is_bool($value) => PDO::PARAM_BOOL,
+                    $value === null      => PDO::PARAM_NULL,
+                    default              => PDO::PARAM_STR
+                });
+            }
+
+            $stmt->execute();
             return $stmt;
         } catch (PDOException $e) {
-            if (defined('LODUR_TEST_SERVER')) {
+            if (defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) {
                 array_map(error_log(...), str_split("<br><b>{$e->getMessage()}</b><br>{$this->getPdoDebug($stmt ?? false)}", 600));
             }
             throw $e;
         }
     }
+
 
     /**
      * Get debug information from a PDO statement for error reporting.
@@ -137,8 +153,8 @@ trait CommonModelPicoPdoTrait
      *  bindings:[':date' => $date]);
      * ```
      * @param string $table Table name
-     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
-     * @param int|string|array<string|int, mixed>|null $bindings Value for single column or array of bound values for custom condition
+     * @param WhereInput $where Column name, condition string, or associative array
+     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
      * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
      * @return bool True if at least one record exists, false otherwise
      * @throws PDOException
@@ -177,7 +193,7 @@ trait CommonModelPicoPdoTrait
      * // Returns ['id' => 123, 'rows' => 1, 'status' => 'inserted']
      * ```
      * @param string $table Table name
-     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @param DataMap $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @param array<string, mixed>|null $options Additional options for the insert operation
      * (e.g., ['mode' => 'REPLACE'] or ['mode' => 'INSERT IGNORE'] or ['onDuplicateKeyUpdate' => ['column' => 'value']])
      * @return int|string|array<string, mixed> The ID of the inserted record, 0 if failed. If 'meta' is set to true, returns an array with meta info like ['id', 'rows', 'status' => 'noop|inserted|updated']
@@ -231,7 +247,7 @@ trait CommonModelPicoPdoTrait
     /**
      * This is a wrapper around {@see insert()} that performs a `REPLACE INTO`.
      * @param string $table Table name
-     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @param DataMap $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @return int|string The ID of the inserted record, 0 if failed.
      */
     protected function insertReplace(string $table, array $data): int|string
@@ -250,7 +266,7 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $table Table name
-     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @param DataMap $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @return array{id: int|string, rows: int, status: string} Inserted record meta info ['id', 'rows', 'status' => 'noop|inserted|updated']
      */
     protected function insertIgnore(string $table, array $data): array
@@ -270,8 +286,8 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $table Table name
-     * @param array<string|int, mixed> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
-     * @param array<string|int, mixed> $onDuplicateKeyUpdate Key-value pairs of column names and values to update on duplicate key or raw sql queries like 'date = NOW()'. If null/empty, the $data array will be used
+     * @param DataMap $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @param DataMap|null $onDuplicateKeyUpdate Key-value pairs of column names and values to update on duplicate key or raw sql queries like 'date = NOW()'. If null/empty, the $data array will be used
      * @return array{id: int|string, rows: int, status: string} Inserted record meta info ['id', 'rows', 'status' => 'noop|inserted|updated']
      */
     protected function insertOnDuplicateKeyUpdate(string $table, array $data, array|null $onDuplicateKeyUpdate = null): array
@@ -324,9 +340,9 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $table Table name
-     * @param array<string|int, mixed> $data Key-value pairs of column names and values to update or raw sql queries like 'date = NOW()'
-     * @param string|array<string|int, mixed> $where Column name, condition string, or associative array
-     * @param int|string|array<string|int, mixed>|null $bindings Value for single column or array of bound values for custom condition
+     * @param DataMap $data Key-value pairs of column names and values to update or raw sql queries like 'date = NOW()'
+     * @param string|DataMap $where Column name, condition string, or associative array
+     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
      * @return int Number of affected rows
      * @throws PDOException
      */
@@ -384,9 +400,9 @@ trait CommonModelPicoPdoTrait
      *  bindings:[':date' => $date])->fetchAll()
      * ```
      * @param string $table Table name
-     * @param array<string>|string|int|null $columns Columns to select (default '*')
-     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
-     * @param int|string|array<string|int, mixed>|null $bindings Value for single column or array of bound values for custom condition
+     * @param list<string>|string|int|null $columns Columns to select (default '*')
+     * @param WhereInput $where Column name, condition string, or associative array
+     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
      * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
      * @return PDOStatement|false
      */
@@ -404,9 +420,9 @@ trait CommonModelPicoPdoTrait
      * Wrapper for {@see select()} to fetch one row only, LIMIT 1 is appended automatically.
      *
      * @param string $table Table name
-     * @param array<string>|string|int|null $columns Columns to select (default '*')
-     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
-     * @param int|string|array<string|int, mixed>|null $bindings Value for single column or array of bound values for custom condition
+     * @param list<string>|string|int|null $columns Columns to select (default '*')
+     * @param WhereInput $where Column name, condition string, or associative array
+     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
      * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY .. ) LIMIT 1 is appended automatically.
      * @return array<string, mixed>
      */
@@ -419,73 +435,15 @@ trait CommonModelPicoPdoTrait
      * Wrapper for {@see select()} to fetch all rows.
      *
      * @param string $table Table name
-     * @param array<string>|string|int|null $columns Columns to select (default '*')
-     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
-     * @param int|string|array<string|int, mixed>|null $bindings Value for single column or array of bound values for custom condition
+     * @param list<string>|string|int|null $columns Columns to select (default '*')
+     * @param WhereInput $where Column name, condition string, or associative array
+     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
      * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
-     * @return array<int, array<string, mixed>>
+     * @return list<array<string, mixed>>
      */
     protected function selectAll(string $table, array|string|int|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): array
     {
         return $this->select($table, $columns, $where, $bindings, $sqlTail)->fetchAll(PDO::FETCH_ASSOC);
-    }
-
-
-
-
-    /**
-     * Select rows with optional JOIN clause(s).
-     *
-     * Works like {@see select()}, but allows injecting one or more JOIN strings
-     * between FROM and WHERE.
-     *
-     * ### Complex Example (all features):
-     * ```
-     * $stmt = $this->selectJoin(
-     *     'users u',
-     *     [
-     *         'u.id',
-     *         'u.name',
-     *         'u.email',
-     *         'p.bio',
-     *         'COUNT(o.id) AS order_count',
-     *         'SUM(o.total) AS total_spent'
-     *     ],
-     *     [
-     *         'LEFT JOIN profiles p ON p.user_id = u.id',
-     *         'LEFT JOIN orders o ON o.user_id = u.id AND o.total > ?' => 100  // Binding in JOIN clause
-     *     ],
-     *     [
-     *         'u.status' => 'active',                    // Key with dot - sanitized to :where_u_status
-     *         'u.name != ""',                            // Raw SQL (numeric key)
-     *         'u.created_at > :min_date',                 // Raw SQL with named placeholder
-     *         'u.created_at < ?' => $maxLastLogin,        // Key with ? placeholder
-     *         'u.id IN (:user_ids)'                       // IN clause with named placeholder (raw SQL)
-     *     ],
-     *     [
-     *         ':min_date' => '2024-01-01',
-     *         ':user_ids' => [1, 2, 3],                   // Will expand to :user_ids0, :user_ids1, :user_ids2
-     *         ':min_spent' => 1000                        // For HAVING clause in sqlTail
-     *     ],
-     *     'GROUP BY u.id HAVING total_spent > :min_spent ORDER BY total_spent DESC LIMIT 10'
-     * );
-     * ```
-     *
-     * @param string                        $table    Base table with optional alias, e.g. 'kurse K'
-     * @param array<string>|string|int|null $columns  Columns to select (default '*')
-     * @param string|array<int,string>|null $joins    JOIN clause(s) as string or list of strings
-     * @param string|array<string|int,mixed>|null $where    Same semantics as {@see buildWhereQuery()}
-     * @param int|string|array<string|int,mixed>|null $bindings Bindings for WHERE placeholders
-     * @param string|null                   $sqlTail  Extra suffix (GROUP BY / ORDER BY / LIMIT ...)
-     * @return PDOStatement|false
-     */
-    protected function selectJoin(string $table, array|string|int|null $columns = null, string|array|null $joins = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): PDOStatement|false {
-        $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
-        [$joinClause, $bindings] = $this->buildSqlClause((array)$joins, 'join_', ' ', (array)$bindings);
-        [$whereClause, $bindings] = $this->buildWhereQuery($where, $bindings);
-        $whereClause = empty($where) || str_contains($whereClause, 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
-        $sql = implode(' ', array_filter(array_map(trim(...), ['SELECT', $columnList, 'FROM', $table, $joinClause, $whereClause, (string)$sqlTail])));
-        return $this->prepExec($sql, $bindings);
     }
 
 
@@ -515,8 +473,8 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $table Table name
-     * @param string|array<string|int, mixed> $where Column name, condition string, or associative array
-     * @param int|string|array<string|int, mixed>|null $bindings Value for single column or array of bound values for custom condition
+     * @param string|DataMap $where Column name, condition string, or associative array
+     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
      * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
      * @return int Number of affected rows
      * @throws PDOException
@@ -548,8 +506,8 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $sql The SQL query containing named placeholders.
-     * @param array<string, mixed> $params The parameters to bind, where array values are expanded.
-     * @return array{0: string, 1: array<string, mixed>} The modified SQL query and the updated bind parameters.
+     * @param BindingsMap $params The parameters to bind, where array values are expanded.
+     * @return array{0: string, 1: BindingsMap} The modified SQL query and the updated bind parameters.
      */
     protected function buildInQuery(string $sql, array $params): array
     {
@@ -563,7 +521,7 @@ trait CommonModelPicoPdoTrait
             if (is_array($value)) {
 
                 if(is_numeric($key) || empty($value)){
-                    if(defined('LODUR_TEST_SERVER')) {
+                    if(defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) {
                         error_log('Provided array for IN clause is empty or key is numeric - ' . $sql . ' - ' . json_encode([$key => $value]));
                     }
                     unset($params[(string)$key]);
@@ -600,26 +558,28 @@ trait CommonModelPicoPdoTrait
      * Build SQL clauses and parameters from mixed data array, converting to named placeholders for key-value pairs.
      * ```
      * buildSqlClause(['name' => 'John', 'email' => 'john@example.com', 'created_at = NOW()'], 'insert_');
-     * //sql: `name` = :insert_name, `email` = :insert_email, created_at = NOW()
+     * //sql: name = :insert_name, email = :insert_email, created_at = NOW()
      * //params: [':insert_name' => 'John', ':insert_email' => 'john@example.com']
      * ```
      * With AND joiner
      * ```
      * buildSqlClause(['name' => 'John', 'email' => 'john@example.com', 'created_at = NOW()'], 'insert_', ' AND ');
-     * //sql: `name` = :insert_name AND `email` = :insert_email AND created_at = NOW()
+     * //sql: name = :insert_name AND email = :insert_email AND created_at = NOW()
      * //params: [':insert_name' => 'John', ':insert_email' => 'john@example.com']
      * ```
      * With ? placeholders converted to named:
      * ```
      * buildSqlClause(['name' => 'John', 'email' => 'john@example,com', 'last_login = ?' => '2024-01-01'], 'update_', ', ');
-     * //sql: `name` = :update_name, `email` = :update_email, last_login = :update_0
+     * //sql: name = :update_name, email = :update_email, last_login = :update_0
      * //params: [':update_name' => 'John', ':update_email' => 'john@example,com', ':update_0' => '2024-01-01']
      *
-     * @param array<int|string, mixed> $data Mixed array of key-value pairs and raw SQL strings
+     * @param DataMap $data Mixed array of key-value pairs and raw SQL strings
      * @param string|null $prefix Parameter prefix (e.g., 'set_', 'insert_', 'update_')
      * @param string|null $joiner How to join the clauses (e.g., ', ', ' AND ', ' OR ')
-     * @param array<string|int, mixed> $bindings - Additional bindings for raw SQL entries not listed in $data, pass through in mind.
-     * @return array{0: string, 1: array<string, mixed>} [sqlClause, parameters]
+     * @param BindingsMap $bindings Additional bindings for raw SQL entries not listed in $data, pass through in mind.
+     * @return array{0: string, 1: BindingsMap} [sqlClause, parameters]
+     *
+     * Dots in column keys (e.g. `u.id`) are kept in the SQL fragment; the bound name uses `_dot_` (e.g. `:where_u_dot_id`).
      */
     protected function buildSqlClause(array $data, string|null $prefix = null, string|null $joiner = null, array $bindings = []): array
     {
@@ -637,14 +597,10 @@ trait CommonModelPicoPdoTrait
                 $sqlPairs[] = $key;
                 $params[] = $value;
             } else {
-                // Key-value pair like "name" => "John"
-                // Sanitize parameter name: replace dots with underscores (PDO doesn't support dots in parameter names)
-                // For keys with dots (table aliases like "u.status"), don't wrap in backticks
-                // For simple keys, wrap in backticks for safety
-                $paramName = str_replace('.', '_', $key);
-                $columnRef = str_contains($key, '.') ? $key : "`{$key}`";
-                $sqlPairs[] = "{$columnRef} = :{$prefix}{$paramName}";
-                $params[":{$prefix}{$paramName}"] = $value;
+                // Key-value pair like "users.name" => "John"
+                $keySafe = str_replace('.', '_dot_', $key);
+                $sqlPairs[] = "{$key} = :{$prefix}{$keySafe}";
+                $params[":{$prefix}{$keySafe}"] = $value;
             }
         }
 
@@ -676,21 +632,21 @@ trait CommonModelPicoPdoTrait
      * 1. Single key-value pair
      * ```
      * buildWhereQuery('id', 1);
-     * // `id` = :where_id
+     * // id = :where_id
      * // [':where_id' => 1]
      * ```
      *
      * 2.a Multiple key-value conditions
      * ```
      * buildWhereQuery(['id' => 1, 'status' => 'active']);
-     * // `id` = :where_id AND `status` = :where_status
+     * // id = :where_id AND status = :where_status
      * // [':where_id' => 1, ':where_status' => 'active']
      * ```
      *
      * 2.b Multiple key-value conditions with raw SQL as numeric key entries
      * ```
      * buildWhereQuery(['id' => 1, 'status' => 'active', 'email_verified != 0', 'created_at > :date'], [':date' => $date]);
-     * // `id` = :where_id AND `status` = :where_status AND email_verified != 0 AND created_at > :date
+     * // id = :where_id AND status = :where_status AND email_verified != 0 AND created_at > :date
      * // [':where_id' => 1, ':where_status' => 'active', ':date' => $date]
      * ```
      *
@@ -725,42 +681,37 @@ trait CommonModelPicoPdoTrait
      * ```
      * buildWhereQuery(['id IN (?)' => $ids, 'created_at > ?' => $date]);
      *
-     * @param string|array<string|int, mixed>|null $where Column name, condition string, or associative array
-     * @param int|string|array<string|int, mixed>|null $bindings Value for single column or array of bound values for custom condition
-     * @return array{0: string, 1: array<string, mixed>} The WHERE clause and parameter bindings
+     * @param WhereInput $where Column name, condition string, or associative array
+     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
+     * @return array{0: string, 1: BindingsMap} The WHERE clause and parameter bindings
      */
     protected function buildWhereQuery(string|array|null $where = null, int|string|array|null $bindings = null): array
     {
-        if (empty($where)) { // Case: No WHERE clause provided
+        if (empty($where)) {
             return ['', (array)$bindings];
         }
 
-        if (is_array($where)) { // Case: WHERE is associative array like ['id' => 1, 'status' => 'active']
+        if (is_array($where)) {
             [$where, $bindings] = $this->buildSqlClause($where, 'where_', ' AND ', (array)$bindings);
         }
 
-        if (str_contains($where, '?')) { // Case: WHERE contains ? placeholders that need conversion
+        if (str_contains($where, '?')) {
             [$where, $bindings] = $this->convertToNamedPlaceholders($where, (array)$bindings, 'where_');
         }
 
-        if (is_array($bindings) && array_filter($bindings, is_array(...))) { // Case: WHERE has IN clauses with array values
+        if (is_array($bindings) && array_filter($bindings, is_array(...))) {
             [$where, $bindings] = $this->buildInQuery($where, $bindings);
         }
 
-        if (str_contains($where, ':')) { // Case: WHERE already has named placeholders, return as-is
+        if (str_contains($where, ':')) {
             return [$where, (array)$bindings];
         }
 
-        if (is_scalar($bindings)) { // Case: Simple column name with scalar value like buildWhereQuery('id', 1)
+        if (is_scalar($bindings)) {
             return ["{$where} = :where_{$where}", [":where_{$where}" => $bindings]];
         }
 
-        if(is_array($bindings) && count($bindings) === 1) { // Case: Column name with array binding (single element) - treat as scalar
-            $firstKey = array_key_first($bindings);
-            return ["{$where} = :where_{$where}", [":where_{$where}" => $bindings[$firstKey]]];
-        }
-
-        return [$where, (array)$bindings]; // Case: Raw SQL without placeholders or fallback
+        return [$where, (array)$bindings];
     }
 
     /**
@@ -775,9 +726,9 @@ trait CommonModelPicoPdoTrait
      * // $newBindings: [':nph_0' => 5, ':nph_1' => 'active']
      * ```
      * @param string $query
-     * @param array<int|string, mixed> $bindings
+     * @param BindingsMap $bindings
      * @param string|null $prefix
-     * @return array{0: string, 1: array<string, mixed>} [modified query, updated bindings]
+     * @return array{0: string, 1: BindingsMap} [modified query, updated bindings]
      */
     protected function convertToNamedPlaceholders(string $query, array $bindings, string|null $prefix = null): array
     {

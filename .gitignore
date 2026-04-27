@@ -6,4 +6,7 @@
 .idea/
 .vscode/
 *.swp
-*.swo 
+*.swo
+.phpunit*
+clover.xml
+.phpunit.result.cache

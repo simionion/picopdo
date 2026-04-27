@@ -10,7 +10,6 @@ A lightweight PDO trait for PHP models that provides common database operations 
 - **Raw SQL in arrays** - Use numeric keys for raw SQL strings
 - **Keys with `?` placeholders** - Direct binding syntax: `['date > ?' => $date]`
 - **INSERT modes** - INSERT, REPLACE, INSERT IGNORE, ON DUPLICATE KEY UPDATE
-- **JOIN support** - `selectJoin()` method for complex queries
 - **100% test coverage** across unit and integration tests
 
 ## Requirements
@@ -96,7 +95,7 @@ $users = $model->selectAll('users', null, [
     'status' => 'active',
     'date > ?' => '2024-01-01'    // Key contains ?, value is binding
 ]);
-// Generates: WHERE `status` = :where_status AND date > :where_0
+// Generates: WHERE status = :where_status AND date > :where_0
 ```
 
 **Mixed placeholders:**
@@ -129,23 +128,7 @@ $result = $model->insertOnDuplicateKeyUpdate('users',
 // Returns: ['id' => 123|0, 'rows' => 1|2|0, 'status' => 'inserted'|'updated'|'noop']
 ```
 
-### 5. JOIN Support
-
-```php
-$stmt = $model->selectJoin(
-    'users u',
-    ['u.id', 'u.name', 'p.bio'],
-    'LEFT JOIN profiles p ON p.user_id = u.id',
-    ['u.id' => 1]
-);
-
-// Multiple JOINs
-$joins = [
-    'LEFT JOIN profiles p ON p.user_id = u.id',
-    'LEFT JOIN addresses a ON a.user_id = u.id'
-];
-$stmt = $model->selectJoin('users u', ['u.*', 'p.bio', 'a.address'], $joins, 'u.status = ?', ['active']);
-```
+For queries with JOINs or other SQL the helpers do not cover, use **`prepExec()`** with bound parameters (same `?` → named conversion applies).
 
 ## Common Operations
 
@@ -189,40 +172,27 @@ $exists = $model->exists('users', ['email' => 'john@example.com', 'status' => 'a
 
 ## Complex Example: All Features Combined
 
-Here's a comprehensive example showcasing all features together:
+Here's a comprehensive example showcasing flexible WHERE, `IN` expansion, `?` bindings, and `sqlTail`:
 
 ```php
-// Complex query with JOINs, flexible WHERE, IN clauses, raw SQL, and sqlTail with bindings
-$stmt = $model->selectJoin(
-    'users u',
+$maxLastLogin = '2024-06-01';
+
+$users = $model->selectAll(
+    'users',
+    ['id', 'name', 'email'],
     [
-        'u.id',
-        'u.name',
-        'u.email',
-        'p.bio',
-        'COUNT(o.id) AS order_count',
-        'SUM(o.total) AS total_spent'
-    ],
-    [
-        'LEFT JOIN profiles p ON p.user_id = u.id',
-        'LEFT JOIN orders o ON o.user_id = u.id'
-    ],
-    [
-        'u.status' => 'active',                    // Key with dot - sanitized to :where_u_status
-        'u.name != ""',                            // Raw SQL (numeric key)
-        'u.created_at > :min_date',                 // Raw SQL with named placeholder
-        'u.created_at < ?' => $maxLastLogin,        // Key with ? placeholder
-        'u.id IN (:user_ids)'                       // IN clause with named placeholder (raw SQL)
+        'status' => 'active',
+        'name != ""',
+        'created_at > :min_date',
+        'created_at < ?' => $maxLastLogin,
+        'id IN (:user_ids)',
     ],
     [
         ':min_date' => '2024-01-01',
-        ':user_ids' => [1, 2, 3],                   // Will expand to :user_ids0, :user_ids1, :user_ids2
-        ':min_spent' => 1000                        // For HAVING clause in sqlTail
+        ':user_ids' => [1, 2, 3],
     ],
-    'GROUP BY u.id HAVING total_spent > :min_spent ORDER BY total_spent DESC LIMIT 10'
+    'ORDER BY name LIMIT 10'
 );
-
-$results = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ```
 
 ## Limitations
@@ -260,12 +230,10 @@ $users = $model->selectAll('users', null, ["name LIKE ?", "status = ?"],
 
 ## Testing
 
-Current test coverage:
-- **196 tests** (135 unit tests, 61 integration tests)
-- **596 assertions**
-- Classes: 100.00% (1/1)
-- Methods: 100.00% (17/17)
-- Lines: 100.00% (133/133)
+Current test coverage (`make test` prints a text summary; `make test-coverage` generates HTML):
+- **102 tests** (52 unit, 50 integration)
+- **240 assertions**
+- **100%** lines and methods on `CommonModelPicoPdoTrait` (Xdebug)
 
 ```bash
 make test              # Run all tests
