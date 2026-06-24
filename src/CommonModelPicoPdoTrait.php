@@ -8,6 +8,7 @@ use PDOException;
 use PDOStatement;
 
 
+
 /**
  * Trait CommonModelPicoPdoTrait
  *
@@ -192,6 +193,15 @@ trait CommonModelPicoPdoTrait
      * $db->insert('users', ['name' => 'John', 'email' => 'john@example.com'], ['meta' => true]);
      * // Returns ['id' => 123, 'rows' => 1, 'status' => 'inserted']
      * ```
+     *  Multiple rows:
+     * ```
+     *    $this->insert('users', [
+     *        ['name' => 'Ion', 'created_at = NOW()', 'is_active' => 1],
+     *        ['name' => 'Ani', 'created_at = NOW()', 'is_active' => 0],
+     *    ]);
+     * ```
+     *  Rows with different shapes are inserted in separate batches.
+     *
      * @param string $table Table name
      * @param DataMap $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @param array<string, mixed>|null $options Additional options for the insert operation
@@ -207,40 +217,39 @@ trait CommonModelPicoPdoTrait
             'onDuplicateKeyUpdate' => []
         ], (array)$options);
 
-        $onDuplicateKeyUpdate = (array)$config['onDuplicateKeyUpdate'];
-
         $insertMode = match (strtoupper(trim((string)$config['mode']))) {
             'REPLACE'       => 'REPLACE', /*insertReplace(...)*/
             'INSERT IGNORE' => 'INSERT IGNORE', /*insertIgnore(...)*/
             default         => 'INSERT'
         };
 
-        [$setClause, $params] = $this->buildSqlClause($data, 'set_', ', ');
-        $sql = "{$insertMode} INTO {$table} SET {$setClause}";
-
-        if ($insertMode === 'INSERT' && !empty($onDuplicateKeyUpdate)) {
-            [$updateClause, $params] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_', ', ', $params);
-            $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
+        $rowCount = 0;
+        $isMultipleInsert = array_is_list($data) && is_array($data[0] ?? null);
+        foreach ($this->groupInsertRowsByColumns($isMultipleInsert ? $data : [$data]) as $rows) {
+            [$sql, $params] = $this->buildInsertValuesSql($table, $rows, $insertMode, (array)$config['onDuplicateKeyUpdate']);
+            $rowCount += $this->prepExec($sql, $params)->rowCount();
         }
 
-        $rowCount = $this->prepExec($sql, $params)->rowCount();
         $isSuccess = $rowCount > 0;
         $lastInsertId = $this->pdo->lastInsertId() ?: 0;
         $rawId = $isSuccess ? $lastInsertId : 0;
         $id = is_numeric($rawId) ? (int)$rawId : $rawId;
-        if ($config['meta']) {
+        if ($config['meta'] || $isMultipleInsert) {
+            $isUpsert = $insertMode === 'INSERT' && (array)$config['onDuplicateKeyUpdate'] !== [];
+            $status = match (true) {
+                $rowCount === 0 => 'noop',
+                $isUpsert && $rowCount > 1 => 'updated',
+                default => 'inserted',
+            };
+
             return [
-                'id'     => $id,
-                'rows'   => $rowCount,
-                'status' => match ($rowCount) {
-                    0       => 'noop',
-                    1       => 'inserted',
-                    default => 'updated'
-                }
+                'id' => $id,
+                'rows' => $rowCount,
+                'status' => $status,
             ];
         }
 
-        return $id;
+            return $id;
     }
 
 
@@ -745,5 +754,82 @@ trait CommonModelPicoPdoTrait
         }, $query);
 
         return [$clause, $bindings];
+    }
+
+    /**
+     * @param list<DataMap> $rows
+     * @return array<string, list<DataMap>>
+     */
+    private function groupInsertRowsByColumns(array $rows): array
+    {
+        $batches = [];
+        foreach ($rows as $row) {
+            $columns = array_map($this->extractInsertColumn(...), array_keys($row), $row);
+            $batchKey = implode('|', $columns);
+            $batches[$batchKey][] = $row;
+        }
+        return $batches;
+    }
+
+    /**
+     * @param string $table
+     * @param list<DataMap> $rows
+     * @param string $insertMode
+     * @param DataMap $onDuplicateKeyUpdate
+     * @return array{0: string, 1: BindingsMap}
+     */
+    private function buildInsertValuesSql(string $table, array $rows, string $insertMode, array $onDuplicateKeyUpdate = []): array
+    {
+        $params = [];
+        $valueRows = [];
+        $columns = null;
+        foreach ($rows as $index => $row) {
+            [$rowColumns, $values, $rowParams] = $this->buildInsertValuesParts($row, "row_{$index}_");
+            $columns ??= $rowColumns;
+            $valueRows[] = '(' . implode(', ', $values) . ')';
+            $params = array_merge($params, $rowParams);
+        }
+        $sql = "{$insertMode} INTO {$table} (" . implode(', ', $columns) . ') VALUES ' . implode(', ', $valueRows);
+        if ($insertMode === 'INSERT' && $onDuplicateKeyUpdate !== []) {
+            [$updateClause, $params] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_', ', ', $params);
+            $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
+        }
+        return [$sql, $params];
+    }
+
+    /**
+     * @param DataMap $row
+     * @param string $prefix
+     * @return array{0: list<string>, 1: list<string>, 2: BindingsMap}
+     */
+    private function buildInsertValuesParts(array $row, string $prefix): array
+    {
+        $columns = [];
+        $values = [];
+        $params = [];
+        foreach ($row as $key => $value) {
+            // Handle raw SQL like "created_at = NOW()"
+            if (is_numeric($key)) {
+                [$column, $expression] = array_map(trim(...), explode('=', (string)$value, 2));
+                $columns[] = $column;
+                $values[] = $expression;
+                continue;
+            }
+            // Handle key-value pairs
+            $column = $this->extractInsertColumn($key, $value);
+            $param = ':' . $prefix . $column;
+            $columns[] = $column;
+            $values[] = $param;
+            $params[$param] = $value;
+        }
+        return [$columns, $values, $params];
+    }
+
+    private function extractInsertColumn(string|int $key, mixed $value): string
+    {
+        if (is_numeric($key)) {
+            return trim(explode('=', (string)$value, 2)[0]);
+        }
+        return (string)$key;
     }
 }

@@ -2,6 +2,8 @@
 
 namespace Lodur\PicoPdo\Tests\Integration;
 
+use Lodur\PicoPdo\CommonModelPicoPdoTrait;
+use PDOException;
 use PHPUnit\Framework\TestCase;
 use PDO;
 
@@ -42,7 +44,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         
         // Create a test class that uses the trait
         $testClass = new class($this->pdo) {
-            use \Lodur\PicoPdo\CommonModelPicoPdoTrait {
+            use CommonModelPicoPdoTrait {
                 insert as public;
                 insertReplace as public;
                 insertIgnore as public;
@@ -303,6 +305,138 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertGreaterThan(0, $result['id']);
         $this->assertEquals(1, $result['rows']);
         $this->assertEquals('inserted', $result['status']);
+    }
+
+    public function testInsertMultipleRowsWithKeyValuePairs()
+    {
+        $result = $this->trait->insert('test_users', [
+            ['name' => 'Batch User 1', 'email' => 'batch1@example.com', 'status' => 'active'],
+            ['name' => 'Batch User 2', 'email' => 'batch2@example.com', 'status' => 'pending'],
+            ['name' => 'Batch User 3', 'email' => 'batch3@example.com', 'status' => 'inactive'],
+        ]);
+
+        $this->assertIsArray($result);
+        $this->assertGreaterThan(0, $result['id']);
+        $this->assertEquals(3, $result['rows']);
+        $this->assertEquals('inserted', $result['status']);
+
+        $rows = $this->trait->selectAll('test_users', ['name', 'email', 'status'], 'email IN (?)', [[
+            'batch1@example.com',
+            'batch2@example.com',
+            'batch3@example.com',
+        ]], 'ORDER BY email');
+
+        $this->assertEquals([
+            ['name' => 'Batch User 1', 'email' => 'batch1@example.com', 'status' => 'active'],
+            ['name' => 'Batch User 2', 'email' => 'batch2@example.com', 'status' => 'pending'],
+            ['name' => 'Batch User 3', 'email' => 'batch3@example.com', 'status' => 'inactive'],
+        ], $rows);
+    }
+
+    public function testInsertMultipleRowsWithRawSqlExpressions()
+    {
+        $result = $this->trait->insert('test_users', [
+            [
+                "name = CONCAT('Year ', YEAR(NOW()))",
+                'email' => 'raw1@example.com',
+                'status = "pending"',
+                'created_at = NOW()',
+            ],
+            [
+                "name = CONCAT('Year ', YEAR(NOW()))",
+                'email' => 'raw2@example.com',
+                'status = "inactive"',
+                'created_at = NOW()',
+            ],
+        ]);
+
+        $this->assertIsArray($result);
+        $this->assertGreaterThan(0, $result['id']);
+        $this->assertEquals(2, $result['rows']);
+        $this->assertEquals('inserted', $result['status']);
+
+        $rows = $this->trait->selectAll(
+            'test_users',
+            ['name', 'email', 'status', 'YEAR(created_at) AS created_year'],
+            'email IN (?)',
+            [['raw1@example.com', 'raw2@example.com']],
+            'ORDER BY email'
+        );
+
+        $yearName = 'Year ' . date('Y');
+        $this->assertEquals($yearName, $rows[0]['name']);
+        $this->assertEquals('raw1@example.com', $rows[0]['email']);
+        $this->assertEquals('pending', $rows[0]['status']);
+        $this->assertEquals(date('Y'), $rows[0]['created_year']);
+        $this->assertEquals($yearName, $rows[1]['name']);
+        $this->assertEquals('raw2@example.com', $rows[1]['email']);
+        $this->assertEquals('inactive', $rows[1]['status']);
+        $this->assertEquals(date('Y'), $rows[1]['created_year']);
+    }
+
+    public function testInsertMultipleRowsWithDifferentColumnLengths()
+    {
+        $result = $this->trait->insert('test_users', [
+            ['name' => 'Shape User 1', 'email' => 'shape1@example.com'],
+            ['name' => 'Shape User 2', 'email' => 'shape2@example.com', 'status' => 'pending'],
+            ['name' => 'Shape User 3', 'email' => 'shape3@example.com'],
+            ['name' => 'Shape User 4', 'email' => 'shape4@example.com', 'status' => 'inactive', 'created_at = NOW()'],
+        ]);
+
+        $this->assertIsArray($result);
+        $this->assertEquals(4, $result['rows']);
+        $this->assertEquals('inserted', $result['status']);
+
+        $rows = $this->trait->selectAll('test_users', ['name', 'email', 'status'], 'email IN (?)', [[
+            'shape1@example.com',
+            'shape2@example.com',
+            'shape3@example.com',
+            'shape4@example.com',
+        ]], 'ORDER BY email');
+
+        $this->assertEquals([
+            ['name' => 'Shape User 1', 'email' => 'shape1@example.com', 'status' => 'active'],
+            ['name' => 'Shape User 2', 'email' => 'shape2@example.com', 'status' => 'pending'],
+            ['name' => 'Shape User 3', 'email' => 'shape3@example.com', 'status' => 'active'],
+            ['name' => 'Shape User 4', 'email' => 'shape4@example.com', 'status' => 'inactive'],
+        ], $rows);
+    }
+
+    public function testInsertMultipleRowsWithDifferentRawSqlColumnShapes()
+    {
+        $result = $this->trait->insert('test_users', [
+            [
+                "name = CONCAT('Raw ', YEAR(NOW()))",
+                'email' => 'raw-shape1@example.com',
+                'status = "pending"',
+            ],
+            [
+                "name = CONCAT('Raw ', YEAR(NOW()))",
+                'email' => 'raw-shape2@example.com',
+                'status = "inactive"',
+                'created_at = NOW()',
+            ],
+        ]);
+
+        $this->assertIsArray($result);
+        $this->assertEquals(2, $result['rows']);
+        $this->assertEquals('inserted', $result['status']);
+
+        $rows = $this->trait->selectAll(
+            'test_users',
+            ['name', 'email', 'status', 'YEAR(created_at) AS created_year'],
+            'email IN (?)',
+            [['raw-shape1@example.com', 'raw-shape2@example.com']],
+            'ORDER BY email'
+        );
+
+        $yearName = 'Raw ' . date('Y');
+        $this->assertEquals($yearName, $rows[0]['name']);
+        $this->assertEquals('pending', $rows[0]['status']);
+        $this->assertEquals(date('Y'), $rows[0]['created_year']);
+        $this->assertEquals($yearName, $rows[1]['name']);
+        $this->assertEquals('inactive', $rows[1]['status']);
+        $this->assertEquals(date('Y'), $rows[1]['created_year']);
     }
 
     public function testInsertReplace()
@@ -978,7 +1112,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         
         // sqlTail is appended after WHERE binding conversion; malformed tail must still fail at the DB.
         // (Relying on unbound "?" in the tail is driver-dependent — some stacks bind or coerce oddly.)
-        $this->expectException(\PDOException::class);
+        $this->expectException(PDOException::class);
 
         $this->trait->selectAll(
             'test_users',

@@ -9,6 +9,7 @@ use PDO;
 use PDOException;
 use PDOStatement;
 use PHPUnit\Framework\TestCase;
+use ValueError;
 
 /**
  * Unit tests without PHPUnit mocks: pure SQL helpers are asserted as strings; anything that runs SQL uses the same
@@ -112,7 +113,7 @@ class CommonModelPicoPdoTraitTest extends TestCase
         try {
             $stmt = $this->_testPrepExec('', []);
             $this->assertInstanceOf(PDOStatement::class, $stmt);
-        } catch (\ValueError) {
+        } catch (ValueError) {
             $this->addToAssertionCount(1);
         }
     }
