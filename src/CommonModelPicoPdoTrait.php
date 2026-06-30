@@ -8,7 +8,6 @@ use PDOException;
 use PDOStatement;
 
 
-
 /**
  * Trait CommonModelPicoPdoTrait
  *
@@ -27,10 +26,95 @@ use PDOStatement;
  * - Simplified methods for SELECT, INSERT, UPDATE, DELETE, and EXISTS operations.
  * - Automatically binds parameters and handles execution errors.
  * - Reduces duplication and boilerplate in model implementations.
+ * - **Mixed placeholders** — `:named` and `?` can appear in the same WHERE/SET clause; pass named keys
+ *   and positional values in one bindings array (e.g. `[':status' => 'active', 5]`).
+ *
+ * ## Common arguments
+ *
+ * Most CRUD helpers share the same parameters. Each accepts several input shapes; the trait normalizes
+ * them into parameterized SQL before execution.
+ *
+ * ### `$table` (string)
+ * Table or `FROM` fragment, passed through as-is into the generated SQL.
+ *
+ * Simple name:
+ * ```
+ * 'users'
+ * 'order_items'
+ * ```
+ *
+ * SELECT / EXISTS — simple JOIN (qualify `$columns` and `$where` with table aliases):
+ * ```
+ * $db->selectAll(
+ *     'users U INNER JOIN profiles P ON P.user_id = U.id',
+ *     ['U.name', 'P.bio'],
+ *     ['U.status' => 'active']
+ * );
+ * ```
+ *
+ * INSERT / UPDATE / DELETE expect a single target table name; use `prepExec()` for more complex statements.
+ *
+ * ### `$columns` (SELECT only — `list<string>|string|null`, default `'*'`)
+ * - `'id, name, email'` — comma-separated column list
+ * - `['id', 'name', 'email']` — array of column names
+ * - `null` or omitted — selects `*`
+ *
+ * ### `$data` (`DataMap` or `list<DataMap>`)
+ * Column values and expressions. Used as INSERT row(s) or UPDATE `SET` clause(s).
+ *
+ * **Single map** — one row / one update:
+ * - `'name' => 'John'` — `name = :prefix_name`
+ * - `'views = views + 1'` — numeric key: raw SQL pasted into the clause (same as insert)
+ * - `'last_login = ?' => $date` — key contains `?`: bound expression
+ * - `'created_at = NOW()'` — numeric key: raw SQL with no binding
+ *
+ * **List of maps** — multi-row INSERT, or batch UPDATE when `$where` is also a list (one map per row).
+ * Rows with different column sets are grouped and inserted in separate statements.
+ *
+ * ### `$where` (`WhereInput` — `string|array|null`)
+ * Row filter. Omitted or empty on UPDATE/DELETE yields an invalid `WHERE` clause (PDO error — guards full-table writes).
+ *
+ * **Shorthand** — column name + scalar `$bindings`:
+ * ```
+ * $where = 'id', $bindings = 1        // id = :where_id
+ * ```
+ *
+ * **Condition string** — raw SQL with optional placeholders:
+ * ```
+ * 'email = ? AND status = ?'
+ * 'status = :status AND id > ?'       // mixed `:named` and `?` supported
+ * 'id IN (:ids)'                      // array binding expands IN list
+ * 'id IN (?)'                         // positional IN: pass `[[1, 2, 3]]`
+ * ```
+ *
+ * **Associative array** — AND-joined conditions (same rules as `$data` keys):
+ * ```
+ * ['id' => 1, 'status' => 'active']                    // equality
+ * ['email_verified != 0', 'created_at > :date']        // raw SQL fragments
+ * ['created_at > ?' => $date]                          // `?` key binds value
+ * ```
+ * Extra bindings for raw fragments can live in `$bindings` when not inline.
+ *
+ * **List** (batch UPDATE only) — one condition per `$data` row, same index order.
+ *
+ * ### `$bindings` (`int|string|BindingsMap|list<...>|null`)
+ * Values for placeholders in `$where` (or in raw `$data` / `$where` entries).
+ *
+ * - Scalar — used with column-name shorthand: `'id', 1`
+ * - Positional list — for `?` placeholders: `['a@example.com', 'active']`
+ * - Named map — for `:placeholder` keys: `[':status' => 'active', ':ids' => [1, 2, 3]]`
+ * - Per-row list (batch UPDATE) — `[$bindingsRow0, $bindingsRow1, …]` aligned with `$data` / `$where`
+ *
+ * ### `$sqlTail` (`string|null`)
+ * Raw SQL suffix appended to the generated statement (e.g. `'ORDER BY id'`, `'ORDER BY id LIMIT 10'`).
+ * On batch UPDATE, a trailing `LIMIT` caps total rows changed across all entries.
+ *
+ * ### `$options` (INSERT only)
+ * `['mode' => 'INSERT'|'REPLACE'|'INSERT IGNORE', 'meta' => bool, 'onDuplicateKeyUpdate' => DataMap]`
  *
  * @update Automatic conversion of `?` placeholders to named placeholders
  * All `?` placeholders in WHERE clauses and SQL clauses are automatically converted to named placeholders
- * (e.g., `:where_0`, `:where_1`, `:set_0`, etc.) for consistency and better support (ex: usage of IN(?)  [[1,2,3]])
+ * (e.g., `:where_0`, `:where_1`, `:set_0`, etc.) for consistency and better support (ex: usage of IN(?)  [[1,2,3]]).
  *
  * @author Ion Simion
  * @repository https://github.com/simionion/picopdo
@@ -60,7 +144,7 @@ trait CommonModelPicoPdoTrait
      * $ids = [1, 2, 3];
      * $stmt = $db->prepExec('SELECT * FROM users WHERE id IN (:ids)', [':ids' => $ids]);
      * // SQL: SELECT * FROM users WHERE id IN (:ids0, :ids1, :ids2)
-     * // Params: ["ids0" => 1, "ids1" => 2, "ids2" => 3]
+     * // Params: [":ids0" => 1, ":ids1" => 2, ":ids2" => 3]
      * ```
      *
      * @param string $sql The SQL query.
@@ -149,7 +233,7 @@ trait CommonModelPicoPdoTrait
      *  'status' => $status, // simple column & binding value
      *  'email_verified != 0', // raw sql, no binding
      *  'created_at > :date'  // raw sql with placeholder binding (ph needs to be added in bindings)
-     *  'create_at > ?' => $date // new* - direct binding for ? placeholder
+     *  'created_at > ?' => $date // new* - direct binding for ? placeholder
      * ],
      *  bindings:[':date' => $date]);
      * ```
@@ -203,7 +287,7 @@ trait CommonModelPicoPdoTrait
      *  Rows with different shapes are inserted in separate batches.
      *
      * @param string $table Table name
-     * @param DataMap $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
+     * @param DataMap|list<DataMap> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @param array<string, mixed>|null $options Additional options for the insert operation
      * (e.g., ['mode' => 'REPLACE'] or ['mode' => 'INSERT IGNORE'] or ['onDuplicateKeyUpdate' => ['column' => 'value']])
      * @return int|string|array<string, mixed> The ID of the inserted record, 0 if failed. If 'meta' is set to true, returns an array with meta info like ['id', 'rows', 'status' => 'noop|inserted|updated']
@@ -223,10 +307,15 @@ trait CommonModelPicoPdoTrait
             default         => 'INSERT'
         };
 
-        $rowCount = 0;
+        $onDuplicateKeyUpdate = (array)$config['onDuplicateKeyUpdate'];
         $isMultipleInsert = array_is_list($data) && is_array($data[0] ?? null);
-        foreach ($this->groupInsertRowsByColumns($isMultipleInsert ? $data : [$data]) as $rows) {
-            [$sql, $params] = $this->buildInsertValuesSql($table, $rows, $insertMode, (array)$config['onDuplicateKeyUpdate']);
+        $rowCount = 0;
+        foreach ($this->buildInsertBatches($isMultipleInsert ? $data : [$data]) as [$columns, $valueRows, $params]) {
+            $sql = "{$insertMode} INTO {$table} ({$columns}) VALUES " . implode(', ', $valueRows);
+            if ($insertMode === 'INSERT' && $onDuplicateKeyUpdate !== []) {
+                [$updateClause, $params] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_', ', ', $params);
+                $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
+            }
             $rowCount += $this->prepExec($sql, $params)->rowCount();
         }
 
@@ -235,21 +324,19 @@ trait CommonModelPicoPdoTrait
         $rawId = $isSuccess ? $lastInsertId : 0;
         $id = is_numeric($rawId) ? (int)$rawId : $rawId;
         if ($config['meta'] || $isMultipleInsert) {
-            $isUpsert = $insertMode === 'INSERT' && (array)$config['onDuplicateKeyUpdate'] !== [];
-            $status = match (true) {
-                $rowCount === 0 => 'noop',
-                $isUpsert && $rowCount > 1 => 'updated',
-                default => 'inserted',
-            };
-
+            $isUpsert = $insertMode === 'INSERT' && $onDuplicateKeyUpdate !== [];
             return [
-                'id' => $id,
-                'rows' => $rowCount,
-                'status' => $status,
+                'id'     => $id,
+                'rows'   => $rowCount,
+                'status' => match (true) {
+                    $rowCount === 0            => 'noop',
+                    $isUpsert && $rowCount > 1 => 'updated',
+                    default                    => 'inserted',
+                },
             ];
         }
 
-            return $id;
+        return $id;
     }
 
 
@@ -308,6 +395,10 @@ trait CommonModelPicoPdoTrait
     /**
      * Update table records by flexible WHERE conditions.
      *
+     * Single updates build classic `SET col = :set_col WHERE …` SQL. Batch updates (parallel `$data` / `$where`
+     * lists) compile to one `CASE WHEN` query per column. `$sqlTail` is appended to the whole statement
+     * (e.g. `ORDER BY id LIMIT 10`); in batch mode a `LIMIT` caps the total rows changed across all entries.
+     *
      * ### Usage examples:
      * Classic key-value:
      * ```
@@ -335,33 +426,69 @@ trait CommonModelPicoPdoTrait
      * ```
      * Multiple values for WHERE IN with `?` placeholder:
      * ```
-     * $db->update('users', 'id IN (?)', [[1, 2, 3]]);
+     * $db->update('users', ['name' => 'John'], 'id IN (?)', [[1, 2, 3]]);
+     * ```
+     * With sqlTail:
+     * ```
+     * $db->update('users', ['status' => 'archived'], ['status' => 'inactive'], null, 'ORDER BY id LIMIT 10');
+     * ```
+     * Multi update (parallel `$data` / `$where` / `$bindings` lists — four rows below cover the main SET & WHERE patterns):
+     * ```
+     * $since = '2024-01-01';
+     * $teamIds = [10, 11, 12];
+     * $data = [
+     *     ['name' => 'Alice', 'views = views + 1'],           // raw SQL in SET (numeric key, same as insert)
+     *     ['name' => 'Carol'],                                 // associative WHERE, no `$bindings`
+     *     ['name' => 'Bob', 'views = views + ?' => 3],        // `?` key in SET binds the increment
+     *     ['name' => 'Dave'],                                 // scalar `$bindings` entry for `?` in row WHERE
+     * ];
+     * $where = [
+     *     ['id' => 1, 'email_verified != 0', 'created_at > :since', 'id IN (:ids)'],
+     *     ['id' => 3],
+     *     'id = ? AND role = ?',
+     *     'id = 4 AND created_at > ?',
+     * ];
+     * $bindings = [
+     *     [':since' => $since, ':ids' => $teamIds],
+     *     null,
+     *     [99, 'editor'],
+     *     $since,
+     * ];
+     * $db->update('users', $data, $where, $bindings);
      * ```
      * Associative array with advanced bindings:
      * ```
-     * $db->update('users', where:[
-     *  'status' => $status, // simple column & binding value
-     *  'email_verified != 0', // raw sql, no binding
-     *  'created_at > :date'  // raw sql with placeholder binding (ph needs to be added in bindings)
-     *  'create_at > ?' => $date // new* - direct binding for ? placeholder
-     * ],
-     *  bindings:[':date' => $date]);
+     * $db->update('users', ['name' => 'John'], [
+     *  'status' => $status,
+     *  'email_verified != 0',
+     *  'created_at > :date',
+     *  'created_at > ?' => $date,
+     * ], [':date' => $date]);
      * ```
      *
      * @param string $table Table name
-     * @param DataMap $data Key-value pairs of column names and values to update or raw sql queries like 'date = NOW()'
-     * @param string|DataMap $where Column name, condition string, or associative array
-     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
+     * @param DataMap|list<DataMap> $data SET map, or list of SET maps when `$where` is also a list (batch)
+     * @param WhereInput|list<DataMap|string> $where Column/condition (single), or list aligned with `$data` (batch)
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings Per-row list when batch `$where` uses `?` / named placeholders
+     * @param string|null $sqlTail Extra query suffix (e.g. ORDER BY, LIMIT)
      * @return int Number of affected rows
      * @throws PDOException
      */
-    protected function update(string $table, array $data, string|array $where, int|string|array|null $bindings = null, string|null $sqlTail = null): int
+    protected function update(string $table, array $data, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
-        [$setClause, $params] = $this->buildSqlClause($data, 'set_', ', ');
-        [$whereClause, $whereParams] = $this->buildWhereQuery($where, $bindings);
+        if ($this->isBatchUpdatePayload($data, $where)) {
+            // Batch: one CASE/WHEN query updating every row at once.
+            [$setClause, $whereClause, $params] = $this->buildUpdateSqlParts($data, $where, $bindings);
+        } else {
+            // Single row: classic UPDATE with the familiar :set_* / :where_* placeholders.
+            [$setClause, $params] = $this->buildSqlClause($data, 'set_', ', ');
+            [$whereClause, $whereParams] = $this->buildWhereQuery($where, $bindings);
+            $params = array_merge($params, $whereParams);
+        }
+
         $whereClause = str_contains($whereClause, 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
-        $sql = implode(' ', array_filter(array_map(trim(...), ['UPDATE', $table, 'SET', $setClause, $whereClause, (string) $sqlTail])));
-        return $this->prepExec($sql, array_merge($params, $whereParams))->rowCount();
+        $sql = implode(' ', array_filter(array_map(trim(...), ['UPDATE', $table, 'SET', $setClause, $whereClause, (string)$sqlTail,])));
+        return $this->prepExec($sql, $params)->rowCount();
     }
 
 
@@ -396,26 +523,25 @@ trait CommonModelPicoPdoTrait
      * ```
      * Multiple values for WHERE IN with `?` placeholder:
      * ```
-     * $db->select('users', 'id IN (?)', [[1, 2, 3]]);
+     * $db->select('users', 'id, name', 'id IN (?)', [[1, 2, 3]])->fetchAll(PDO::FETCH_ASSOC);
      * ```
      * Associative array with advanced bindings:
      * ```
-     * $db->select('users', where:[
-     *  'status' => $status, // simple column & binding value
-     *  'email_verified != 0', // raw sql, no binding
-     *  'created_at > :date'  // raw sql with placeholder binding (ph needs to be added in bindings)
-     *  'create_at > ?' => $date // new* - direct binding for ? placeholder
-     * ],
-     *  bindings:[':date' => $date])->fetchAll()
+     * $db->select('users', 'id, name', [
+     *  'status' => $status,
+     *  'email_verified != 0',
+     *  'created_at > :date',
+     *  'created_at > ?' => $date,
+     * ], [':date' => $date])->fetchAll(PDO::FETCH_ASSOC);
      * ```
      * @param string $table Table name
      * @param list<string>|string|int|null $columns Columns to select (default '*')
      * @param WhereInput $where Column name, condition string, or associative array
      * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
      * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
-     * @return PDOStatement|false
+     * @return PDOStatement
      */
-    protected function select(string $table, array|string|int|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): PDOStatement|false
+    protected function select(string $table, array|string|int|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): PDOStatement
     {
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
@@ -529,8 +655,8 @@ trait CommonModelPicoPdoTrait
         foreach ($params as $key => $value) {
             if (is_array($value)) {
 
-                if(is_numeric($key) || empty($value)){
-                    if(defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) {
+                if (is_numeric($key) || empty($value)) {
+                    if (defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) {
                         error_log('Provided array for IN clause is empty or key is numeric - ' . $sql . ' - ' . json_encode([$key => $value]));
                     }
                     unset($params[(string)$key]);
@@ -581,14 +707,15 @@ trait CommonModelPicoPdoTrait
      * buildSqlClause(['name' => 'John', 'email' => 'john@example,com', 'last_login = ?' => '2024-01-01'], 'update_', ', ');
      * //sql: name = :update_name, email = :update_email, last_login = :update_0
      * //params: [':update_name' => 'John', ':update_email' => 'john@example,com', ':update_0' => '2024-01-01']
+     * ```
+     *
+     * Dots in column keys (e.g. `u.id`) are kept in the SQL fragment; the bound name uses `_dot_` (e.g. `:where_u_dot_id`).
      *
      * @param DataMap $data Mixed array of key-value pairs and raw SQL strings
      * @param string|null $prefix Parameter prefix (e.g., 'set_', 'insert_', 'update_')
      * @param string|null $joiner How to join the clauses (e.g., ', ', ' AND ', ' OR ')
      * @param BindingsMap $bindings Additional bindings for raw SQL entries not listed in $data, pass through in mind.
      * @return array{0: string, 1: BindingsMap} [sqlClause, parameters]
-     *
-     * Dots in column keys (e.g. `u.id`) are kept in the SQL fragment; the bound name uses `_dot_` (e.g. `:where_u_dot_id`).
      */
     protected function buildSqlClause(array $data, string|null $prefix = null, string|null $joiner = null, array $bindings = []): array
     {
@@ -643,6 +770,9 @@ trait CommonModelPicoPdoTrait
      * buildWhereQuery('id', 1);
      * // id = :where_id
      * // [':where_id' => 1]
+     *
+     * buildWhereQuery('id', 1, 'b0_w_'); // custom prefix (batch rows, etc.)
+     * // id = :b0_w_id
      * ```
      *
      * 2.a Multiple key-value conditions
@@ -689,23 +819,25 @@ trait CommonModelPicoPdoTrait
      * 7. Raw SQL with direct bindings
      * ```
      * buildWhereQuery(['id IN (?)' => $ids, 'created_at > ?' => $date]);
+     * ```
      *
      * @param WhereInput $where Column name, condition string, or associative array
      * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
+     * @param string $prefix Named-placeholder prefix for generated binds (default `where_`; batch rows use e.g. `b0_w_`)
      * @return array{0: string, 1: BindingsMap} The WHERE clause and parameter bindings
      */
-    protected function buildWhereQuery(string|array|null $where = null, int|string|array|null $bindings = null): array
+    protected function buildWhereQuery(string|array|null $where = null, int|string|array|null $bindings = null, string $prefix = 'where_'): array
     {
         if (empty($where)) {
             return ['', (array)$bindings];
         }
 
         if (is_array($where)) {
-            [$where, $bindings] = $this->buildSqlClause($where, 'where_', ' AND ', (array)$bindings);
+            [$where, $bindings] = $this->buildSqlClause($where, $prefix, ' AND ', (array)$bindings);
         }
 
         if (str_contains($where, '?')) {
-            [$where, $bindings] = $this->convertToNamedPlaceholders($where, (array)$bindings, 'where_');
+            [$where, $bindings] = $this->convertToNamedPlaceholders($where, (array)$bindings, $prefix);
         }
 
         if (is_array($bindings) && array_filter($bindings, is_array(...))) {
@@ -717,7 +849,10 @@ trait CommonModelPicoPdoTrait
         }
 
         if (is_scalar($bindings)) {
-            return ["{$where} = :where_{$where}", [":where_{$where}" => $bindings]];
+            $keySafe = str_replace('.', '_dot_', (string)$where);
+            $param = ":{$prefix}{$keySafe}";
+
+            return ["{$where} = {$param}", [$param => $bindings]];
         }
 
         return [$where, (array)$bindings];
@@ -756,80 +891,130 @@ trait CommonModelPicoPdoTrait
         return [$clause, $bindings];
     }
 
+
     /**
-     * @param list<DataMap> $rows
-     * @return array<string, list<DataMap>>
+     * Compiles insert rows into per-shape VALUES batches in a single pass.
+     *
+     * Each row is parsed exactly once: string keys become bound `:row_{i}_col` placeholders, numeric keys
+     * carry raw SQL assignments like `'created_at = NOW()'` whose expression is inlined verbatim. Rows are
+     * then grouped by their column list, so {@see insert()} can execute one multi-row statement per shape.
+     * The row index `{i}` is global across the whole payload, keeping placeholders unique between batches.
+     *
+     * ```
+     * buildInsertBatches([
+     *     ['name' => 'Ion', 'created_at = NOW()'],
+     *     ['name' => 'Ani', 'created_at = NOW()'],
+     * ]);
+     * // Returns:
+     * // [
+     * //     'name|created_at' => [
+     * //         'name, created_at',                                    // column list
+     * //         ['(:row_0_name, NOW())', '(:row_1_name, NOW())'],      // one value tuple per row
+     * //         [':row_0_name' => 'Ion', ':row_1_name' => 'Ani'],      // bound params
+     * //     ],
+     * // ]
+     * ```
+     *
+     * @param list<DataMap> $rows Insert rows (a single-row insert is passed as a one-element list).
+     * @return array<string, array{0: string, 1: list<string>, 2: BindingsMap}> Batches keyed by column
+     * signature: [column list SQL, row value tuples, bound params].
      */
-    private function groupInsertRowsByColumns(array $rows): array
+    private function buildInsertBatches(array $rows): array
     {
         $batches = [];
-        foreach ($rows as $row) {
-            $columns = array_map($this->extractInsertColumn(...), array_keys($row), $row);
-            $batchKey = implode('|', $columns);
-            $batches[$batchKey][] = $row;
+        foreach ($rows as $i => $row) {
+            $columns = $values = $params = [];
+            foreach ($row as $key => $value) {
+                if (is_numeric($key)) {
+                    // Raw SQL assignment: split 'created_at = NOW()' into column + inlined expression.
+                    [$column, $expression] = array_map(trim(...), explode('=', (string)$value, 2));
+                } else {
+                    // Key-value pair: bind the value under a per-row unique placeholder.
+                    [$column, $expression] = [$key, ":row_{$i}_{$key}"];
+                    $params[$expression] = $value;
+                }
+                $columns[] = $column;
+                $values[] = $expression;
+            }
+            $shape = implode('|', $columns);
+            $batches[$shape][0] = implode(', ', $columns);
+            $batches[$shape][1][] = '(' . implode(', ', $values) . ')';
+            $batches[$shape][2] = array_merge($batches[$shape][2] ?? [], $params);
         }
         return $batches;
     }
 
-    /**
-     * @param string $table
-     * @param list<DataMap> $rows
-     * @param string $insertMode
-     * @param DataMap $onDuplicateKeyUpdate
-     * @return array{0: string, 1: BindingsMap}
-     */
-    private function buildInsertValuesSql(string $table, array $rows, string $insertMode, array $onDuplicateKeyUpdate = []): array
-    {
-        $params = [];
-        $valueRows = [];
-        $columns = null;
-        foreach ($rows as $index => $row) {
-            [$rowColumns, $values, $rowParams] = $this->buildInsertValuesParts($row, "row_{$index}_");
-            $columns ??= $rowColumns;
-            $valueRows[] = '(' . implode(', ', $values) . ')';
-            $params = array_merge($params, $rowParams);
-        }
-        $sql = "{$insertMode} INTO {$table} (" . implode(', ', $columns) . ') VALUES ' . implode(', ', $valueRows);
-        if ($insertMode === 'INSERT' && $onDuplicateKeyUpdate !== []) {
-            [$updateClause, $params] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_', ', ', $params);
-            $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
-        }
-        return [$sql, $params];
-    }
 
     /**
-     * @param DataMap $row
-     * @param string $prefix
-     * @return array{0: list<string>, 1: list<string>, 2: BindingsMap}
+     * Batch payload = parallel lists: $data is a non-empty list of SET maps and $where a
+     * same-length list of row conditions (maps or column/condition strings).
+     *
+     * @param DataMap|list<DataMap> $data
+     * @param mixed $where
+     * @return bool
      */
-    private function buildInsertValuesParts(array $row, string $prefix): array
+    private function isBatchUpdatePayload(array $data, mixed $where): bool
     {
-        $columns = [];
-        $values = [];
+        return $data !== [] && array_is_list($data)
+            && is_array($where) && array_is_list($where) && count($where) === count($data)
+            && $data === array_filter($data, is_array(...))
+            && $where === array_filter($where, static fn($w) => is_array($w) || is_string($w));
+    }
+
+
+    /**
+     * Compiles parallel update rows into [SET clause, WHERE clause, params] for batch {@see update()}.
+     *
+     * Each touched column becomes one `CASE WHEN <row condition> THEN <value> … ELSE column END`,
+     * and the statement WHERE is the OR of every row condition:
+     * ```
+     * buildUpdateSqlParts([['name' => 'A'], ['name' => 'B']], [['id' => 1], ['id' => 2]], null);
+     * // SET:   name = CASE WHEN id = :b0_w_id THEN :b0_s0_name WHEN id = :b1_w_id THEN :b1_s0_name ELSE name END
+     * // WHERE: (id = :b0_w_id) OR (id = :b1_w_id)
+     * ```
+     *
+     * Rows may set different column subsets; untouched columns keep their value via `CASE ... ELSE col END`.
+     * Every SET entry is compiled through {@see buildSqlClause()} and every row condition through
+     * {@see buildWhereQuery()}, so each row supports the full feature set (raw SQL, `?` keys,
+     * named placeholders, IN expansion). Prefixes `b{row}_w_` / `b{row}_s{entry}_` keep
+     * generated placeholders collision-free across rows and entries.
+     *
+     * @param list<DataMap> $dataRows SET maps, one per row
+     * @param list<DataMap|string> $whereRows Row conditions, parallel to $dataRows
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings List => sliced per row; anything else is shared by all rows
+     * @return array{0: string, 1: string, 2: BindingsMap} [SET clause, WHERE clause, params]
+     */
+    private function buildUpdateSqlParts(array $dataRows, array $whereRows, int|string|array|null $bindings): array
+    {
         $params = [];
-        foreach ($row as $key => $value) {
-            // Handle raw SQL like "created_at = NOW()"
-            if (is_numeric($key)) {
-                [$column, $expression] = array_map(trim(...), explode('=', (string)$value, 2));
-                $columns[] = $column;
-                $values[] = $expression;
-                continue;
+        $wheres = [];
+        $cases = [];
+
+        foreach ($dataRows as $i => $row) {
+            $rowBindings = is_array($bindings) && array_is_list($bindings) ? $bindings[$i] ?? null : $bindings;
+            [$wheres[$i], $whereParams] = $this->buildWhereQuery($whereRows[$i], $rowBindings, "b{$i}_w_");
+            $params += $whereParams;
+
+            $j = 0;
+            foreach ($row as $key => $value) {
+                // One entry at a time: a unique prefix per row+entry keeps `?` placeholders collision-free.
+                [$assignment, $assignParams] = $this->buildSqlClause([$key => $value], 'b' . $i . '_s' . $j++ . '_');
+                [$column, $expression] = array_map(trim(...), explode('=', $assignment, 2));
+                $cases[$column][] = "WHEN {$wheres[$i]} THEN {$expression}";
+                $params += $assignParams;
             }
-            // Handle key-value pairs
-            $column = $this->extractInsertColumn($key, $value);
-            $param = ':' . $prefix . $column;
-            $columns[] = $column;
-            $values[] = $param;
-            $params[$param] = $value;
         }
-        return [$columns, $values, $params];
-    }
 
-    private function extractInsertColumn(string|int $key, mixed $value): string
-    {
-        if (is_numeric($key)) {
-            return trim(explode('=', (string)$value, 2)[0]);
-        }
-        return (string)$key;
+        $set = array_map(
+            static fn(string $column, array $whens): string => "{$column} = CASE " . implode(' ', $whens) . " ELSE {$column} END",
+            array_keys($cases),
+            $cases,
+        );
+
+        return [
+            implode(', ', $set),
+            implode(' OR ', array_map(static fn(string $w): string => "({$w})", $wheres)),
+            $params,
+        ];
     }
 }

@@ -147,6 +147,67 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertEquals('inactive', $result['status']);
     }
 
+    public function testBatchUpdateMultipleRows()
+    {
+        $id1 = $this->trait->insert('test_users', [
+            'name' => 'Batch Before 1',
+            'email' => 'batch_upd_1_' . time() . '@example.com',
+            'status' => 'active',
+        ]);
+        $id2 = $this->trait->insert('test_users', [
+            'name' => 'Batch Before 2',
+            'email' => 'batch_upd_2_' . time() . '@example.com',
+            'status' => 'active',
+        ]);
+        $id3 = $this->trait->insert('test_users', [
+            'name' => 'Batch Before 3',
+            'email' => 'batch_upd_3_' . time() . '@example.com',
+            'status' => 'active',
+        ]);
+
+        $affected = $this->trait->update('test_users', [
+            ['name' => 'Batch After 1', 'status' => 'pending'],
+            ['name' => 'Batch After 2', 'status' => 'inactive'],
+            ['status' => 'pending'],
+        ], [
+            ['id' => $id1],
+            ['id' => $id2],
+            ['id' => $id3],
+        ]);
+
+        $this->assertEquals(3, $affected);
+
+        $this->assertEquals('Batch After 1', $this->trait->selectOne('test_users', 'name', 'id', $id1)['name']);
+        $this->assertEquals('pending', $this->trait->selectOne('test_users', 'status', 'id', $id1)['status']);
+        $this->assertEquals('Batch After 2', $this->trait->selectOne('test_users', 'name', 'id', $id2)['name']);
+        $this->assertEquals('inactive', $this->trait->selectOne('test_users', 'status', 'id', $id2)['status']);
+        // Row 3: only status in batch payload — name must stay unchanged (CASE … ELSE name).
+        $this->assertEquals('Batch Before 3', $this->trait->selectOne('test_users', 'name', 'id', $id3)['name']);
+        $this->assertEquals('pending', $this->trait->selectOne('test_users', 'status', 'id', $id3)['status']);
+    }
+
+    public function testBatchUpdateWithRawSqlInData()
+    {
+        $id = $this->trait->insert('test_users', [
+            'name' => 'Raw Batch User',
+            'email' => 'batch_raw_' . time() . '@example.com',
+            'status' => 'active',
+        ]);
+        $this->pdo->exec("UPDATE test_users SET created_at = '2020-01-01 00:00:00' WHERE id = " . (int) $id);
+
+        $affected = $this->trait->update(
+            'test_users',
+            [['status' => 'inactive', 'created_at = NOW()']],
+            [['id' => $id]]
+        );
+
+        $this->assertEquals(1, $affected);
+
+        $after = $this->trait->selectOne('test_users', ['status', 'created_at'], 'id', $id);
+        $this->assertEquals('inactive', $after['status']);
+        $this->assertGreaterThan('2020-01-01 00:00:00', $after['created_at']);
+    }
+
     public function testDelete()
     {
         // Insert test data
@@ -699,6 +760,50 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         );
         
         $this->assertGreaterThanOrEqual(1, count($results));
+    }
+
+    /**
+     * UPDATE with `:named` and `?` in the same WHERE clause.
+     */
+    public function testUpdateWithMixedNamedAndQuestionMarkPlaceholders()
+    {
+        $id = $this->trait->insert('test_users', [
+            'name' => 'Mixed Update',
+            'email' => 'mixed-update@example.com',
+            'status' => 'active',
+        ]);
+
+        $affected = $this->trait->update(
+            'test_users',
+            ['name' => 'Updated Mixed'],
+            'status = :status AND id > ?',
+            [':status' => 'active', $id - 1]
+        );
+
+        $this->assertEquals(1, $affected);
+        $result = $this->trait->selectOne('test_users', ['name'], 'id', $id);
+        $this->assertEquals('Updated Mixed', $result['name']);
+    }
+
+    /**
+     * DELETE with `:named` and `?` in the same WHERE clause.
+     */
+    public function testDeleteWithMixedNamedAndQuestionMarkPlaceholders()
+    {
+        $id = $this->trait->insert('test_users', [
+            'name' => 'Mixed Delete',
+            'email' => 'mixed-delete@example.com',
+            'status' => 'inactive',
+        ]);
+
+        $affected = $this->trait->delete(
+            'test_users',
+            'status = :status AND id > ?',
+            [':status' => 'inactive', $id - 1]
+        );
+
+        $this->assertEquals(1, $affected);
+        $this->assertFalse($this->trait->exists('test_users', 'id', $id));
     }
 
     public function testSelectWithInQuestionMarkPlaceholder()
