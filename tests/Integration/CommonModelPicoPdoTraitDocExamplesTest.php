@@ -72,6 +72,7 @@ class CommonModelPicoPdoTraitDocExamplesTest extends TestCase
                 select as public;
                 selectOne as public;
                 selectAll as public;
+                selectCompose as public;
                 delete as public;
             }
 
@@ -962,5 +963,118 @@ class CommonModelPicoPdoTraitDocExamplesTest extends TestCase
             [$pattern, 'active']
         );
         $this->assertCount(1, $users);
+    }
+
+    // ——— selectCompose() doc examples (adapted to doc_users / doc_profiles) ———
+
+    public function testDocSelectComposeCoreColumnsFilterAndOrder(): void
+    {
+        $activeId = $this->seedUser('Compose Alice', 'compose-alice@example.com', ['status' => 'active']);
+        $this->seedUser('Compose Bob', 'compose-bob@example.com', ['status' => 'pending']);
+
+        $rows = $this->db->selectCompose(
+            self::TABLE_USERS,
+            [
+                ['select' => ['id', 'name', 'status']],
+                ['where' => ['status' => 'active']],
+            ],
+            'ORDER BY id'
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame($activeId, (int)$rows[0]['id']);
+        $this->assertSame('Compose Alice', $rows[0]['name']);
+    }
+
+    public function testDocSelectComposeOptionalFilterFragment(): void
+    {
+        $id1 = $this->seedUser('Opt A', 'opt-a@example.com', ['status' => 'active']);
+        $this->seedUser('Opt B', 'opt-b@example.com', ['status' => 'active']);
+
+        $core = ['select' => ['id', 'name']];
+        $statusFrag = ['where' => ['status' => 'active']];
+        $fragments = [$core, $statusFrag];
+        // Optional person/id filter — only when needed.
+        $filterToPerson = true;
+        if ($filterToPerson) {
+            $fragments[] = ['where' => ['id' => $id1]];
+        }
+
+        $rows = $this->db->selectCompose(self::TABLE_USERS, $fragments, 'ORDER BY id')
+            ->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('Opt A', $rows[0]['name']);
+    }
+
+    public function testDocSelectComposeRawWhereWithNamedBindings(): void
+    {
+        $id = $this->seedUser('Raw Named', 'raw-named@example.com', [
+            'status' => 'active',
+            'email_verified' => 1,
+        ]);
+
+        $rows = $this->db->selectCompose(self::TABLE_USERS, [
+            ['select' => ['id', 'name']],
+            [
+                'where' => ['(status = :status OR email_verified = :verified)'],
+                'bindings' => [':status' => 'active', ':verified' => 1],
+            ],
+            ['where' => ['id' => $id]],
+        ])->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('Raw Named', $rows[0]['name']);
+    }
+
+    public function testDocSelectComposeBindingsInSelectSubquery(): void
+    {
+        $id = $this->seedUser('Subwhat', 'subwhat@example.com');
+
+        $rows = $this->db->selectCompose(self::TABLE_USERS, [
+            [
+                'select' => [
+                    'id',
+                    'name',
+                    '(SELECT :subwhat) AS senden',
+                ],
+                'bindings' => [':subwhat' => 'flag'],
+            ],
+            ['where' => ['id' => $id]],
+        ])->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('flag', $rows[0]['senden']);
+    }
+
+    public function testDocSelectComposeAlternateFromWithInList(): void
+    {
+        $ids = [
+            $this->seedUser('In A', 'in-a@example.com', ['status' => 'active']),
+            $this->seedUser('In B', 'in-b@example.com', ['status' => 'active']),
+            $this->seedUser('In C', 'in-c@example.com', ['status' => 'pending']),
+        ];
+        $this->pdo->exec(
+            'INSERT INTO ' . self::TABLE_PROFILES . ' (user_id, bio, status) VALUES '
+            . "({$ids[0]}, 'bio-a', 'active'), ({$ids[1]}, 'bio-b', 'active')"
+        );
+
+        $from = self::TABLE_USERS . ' LEFT JOIN ' . self::TABLE_PROFILES
+            . ' ON ' . self::TABLE_PROFILES . '.user_id = ' . self::TABLE_USERS . '.id';
+
+        $rows = $this->db->selectCompose(
+            $from,
+            [
+                ['select' => [self::TABLE_USERS . '.id', self::TABLE_USERS . '.name', self::TABLE_PROFILES . '.bio']],
+                [
+                    'where' => [self::TABLE_USERS . '.id IN (:ids)'],
+                    'bindings' => [':ids' => [$ids[0], $ids[1]]],
+                ],
+            ],
+            'ORDER BY ' . self::TABLE_USERS . '.id'
+        )->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(2, $rows);
+        $this->assertSame(['bio-a', 'bio-b'], array_column($rows, 'bio'));
     }
 }

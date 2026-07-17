@@ -432,27 +432,21 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->update('users', ['status' => 'archived'], ['status' => 'inactive'], null, 'ORDER BY id LIMIT 10');
      * ```
-     * Multi update (parallel `$data` / `$where` / `$bindings` lists — four rows below cover the main SET & WHERE patterns):
+     * Multi update (parallel `$data` / `$where` / `$bindings` lists — two rows below cover the main SET & WHERE patterns):
      * ```
      * $since = '2024-01-01';
      * $teamIds = [10, 11, 12];
      * $data = [
      *     ['name' => 'Alice', 'views = views + 1'],           // raw SQL in SET (numeric key, same as insert)
-     *     ['name' => 'Carol'],                                 // associative WHERE, no `$bindings`
      *     ['name' => 'Bob', 'views = views + ?' => 3],        // `?` key in SET binds the increment
-     *     ['name' => 'Dave'],                                 // scalar `$bindings` entry for `?` in row WHERE
      * ];
      * $where = [
      *     ['id' => 1, 'email_verified != 0', 'created_at > :since', 'id IN (:ids)'],
-     *     ['id' => 3],
      *     'id = ? AND role = ?',
-     *     'id = 4 AND created_at > ?',
      * ];
      * $bindings = [
      *     [':since' => $since, ':ids' => $teamIds],
-     *     null,
      *     [99, 'editor'],
-     *     $since,
      * ];
      * $db->update('users', $data, $where, $bindings);
      * ```
@@ -545,7 +539,7 @@ trait CommonModelPicoPdoTrait
     {
         $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
         [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
-        $whereClause = empty($where) || str_contains($whereClause, 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
+        $whereClause = empty($where) || str_starts_with(ltrim($whereClause), 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
         $sql = implode(' ', array_filter(array_map(trim(...), ['SELECT', $columnList, 'FROM', $table, $whereClause, (string)$sqlTail])));
         return $this->prepExec($sql, $params);
     }
@@ -581,6 +575,143 @@ trait CommonModelPicoPdoTrait
         return $this->select($table, $columns, $where, $bindings, $sqlTail)->fetchAll(PDO::FETCH_ASSOC);
     }
 
+
+    /**
+     * Select rows by merging reusable SQL fragments, then executing via {@see select()}.
+     *
+     * Use when a listing query is built from optional pieces (core columns, filters, extras)
+     * that should be appended independently without concatenating JOIN/WHERE strings by hand.
+     *
+     * ### Fragment shape
+     * Each fragment is an associative array with optional keys:
+     * - `select` — list of SELECT expressions (columns, aliases, subqueries)
+     * - `joins` — list of full JOIN clauses (`LEFT JOIN … ON …`), order preserved
+     * - `where` — {@see DataMap} passed to {@see buildSqlClause()} (equality, `?` keys, raw numeric entries)
+     * - `bindings` — {@see BindingsMap} for named placeholders in that fragment's `where` (or SELECT)
+     *
+     * ```
+     * [
+     *     'select'   => ['event.event_id', 'event.date_start'],
+     *     'joins'    => ['LEFT JOIN event_to_tab ON event_to_tab.event_id = event.event_id'],
+     *     'where'    => [
+     *         'event.fw_id' => $fwId,
+     *         'event.date_start >= ?' => $dateFrom,
+     *         'event.status != 0',
+     *     ],
+     *     'bindings' => [':named' => $value],
+     * ]
+     * ```
+     *
+     * ### Behaviour
+     * - `select` / `joins` from all fragments are concatenated; exact duplicate lines are removed
+     * - each fragment's `where` becomes one parenthesized AND-group; groups are AND-joined
+     * - per-fragment parameter prefixes (`frag_{n}_`) avoid placeholder clashes from {@see buildSqlClause()}
+     * - bindings from all fragments are merged (later fragment wins on the same name)
+     * - `$table` is the FROM expression **without** the `FROM` keyword (joins from fragments are appended)
+     * - `$sqlTail` is appended as-is (e.g. full `ORDER BY …`, `GROUP BY …`, `LIMIT …`)
+     * - empty `select` across all fragments falls back to `*` via {@see select()}
+     *
+     * ### Usage examples
+     *
+     * Core columns + year/org filter + order:
+     * ```
+     * $db->selectCompose(
+     *     'uebungs_programm LEFT JOIN event ON event.event_id = uebungs_programm.event_id',
+     *     [
+     *         ['select' => ['event.event_id', 'event.date_start'], 'joins' => ['LEFT JOIN arbeitsrapporte ON …']],
+     *         ['where' => ['event.fw_id' => $fwId, 'event.date_start >= ?' => $yearStart, 'event.date_start < ?' => $yearEnd]],
+     *     ],
+     *     'ORDER BY event.date_start, event.event_id'
+     * )->fetchAll(PDO::FETCH_ASSOC);
+     * ```
+     *
+     * Optional filter fragment (omit the array entry when not needed):
+     * ```
+     * $fragments = [$this->fragCoreListing(), $this->fragWhereYearOrg($year, $fwId)];
+     * if ($filterToPerson) {
+     *     $fragments[] = $this->fragPersonEventFilter($mannschaftId);
+     * }
+     * $db->selectCompose($from, $fragments, $this->sortByListing());
+     * ```
+     *
+     * Raw WHERE + named bindings (complex OR / subquery):
+     * ```
+     * $db->selectCompose($from, [
+     *     $this->fragCoreListing(),
+     *     [
+     *         'where' => ['(event.event_id IN (SELECT … WHERE id = :mannschaft_id) OR …)'],
+     *         'bindings' => [':mannschaft_id' => $mannschaftId],
+     *     ],
+     * ], 'ORDER BY event.date_start');
+     * ```
+     *
+     * Bindings for placeholders that live in SELECT (no WHERE on that fragment):
+     * ```
+     * $db->selectCompose($from, [
+     *     $this->fragCoreListing(),
+     *     [
+     *         'select' => ['(SELECT … WHERE ATD.what_id = :subwhat) AS senden'],
+     *         'bindings' => [':subwhat' => $subwhat],
+     *     ],
+     * ]);
+     * ```
+     *
+     * Alternate FROM (event-first) with IN list:
+     * ```
+     * $db->selectCompose(
+     *     'event LEFT JOIN uebungs_programm ON uebungs_programm.event_id = event.event_id',
+     *     [
+     *         $this->fragCoreListing(),
+     *         ['where' => ['event.event_art_id IN (:ids)'], 'bindings' => [':ids' => $eventArtIds]],
+     *     ],
+     *     'ORDER BY event.date_start'
+     * );
+     * ```
+     *
+     * @param string $table FROM expression without the FROM keyword (may include base JOINs)
+     * @param list<array{
+     *     select?: list<string>,
+     *     joins?: list<string>,
+     *     where?: DataMap,
+     *     bindings?: BindingsMap
+     * }> $fragments Ordered fragment pieces to merge
+     * @param string|null $sqlTail Trailing SQL appended after WHERE (full `ORDER BY` / `GROUP BY` / `LIMIT`)
+     * @return PDOStatement Executed statement — fetch with `fetch` / `fetchAll` / `FETCH_CLASS` as needed
+     * @throws PDOException
+     */
+    protected function selectCompose(string $table, array $fragments, string|null $sqlTail = null): PDOStatement
+    {
+        $select = [];
+        $joins = [];
+        $where = [];
+        $params = [];
+
+        foreach ($fragments as $index => $fragment) {
+            $select = [...$select, ...(array)($fragment['select'] ?? []),];
+            $joins = [...$joins, ...(array)($fragment['joins'] ?? []),];
+            [$whereSql, $fragmentParams] = $this->buildSqlClause(
+                (array)($fragment['where'] ?? []),
+                "frag_{$index}_",
+                ' AND ',
+                (array)($fragment['bindings'] ?? [])
+            );
+            if ($whereSql !== '') {
+                $where[] = "({$whereSql})";
+            }
+            $params = array_merge($params, $fragmentParams);
+        }
+
+        $select = array_values(array_unique($select));
+        $joins = array_values(array_unique($joins));
+
+        return $this->select(
+            implode(PHP_EOL, [$table, ...$joins]),
+            $select ?: null,
+            $where,
+            $params,
+            $sqlTail
+        );
+    }
 
     /**
      * Delete rows from a table using flexible WHERE conditions.

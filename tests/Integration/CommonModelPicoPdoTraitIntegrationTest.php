@@ -52,6 +52,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
                 select as public;
                 selectOne as public;
                 selectAll as public;
+                selectCompose as public;
                 update as public;
                 delete as public;
                 exists as public;
@@ -1450,4 +1451,82 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertArrayHasKey('email', $result);
     }
 
+    // ——— selectCompose ———
+
+    public function testSelectComposeBasicFragmentsAgainstMysql(): void
+    {
+        $idActive = $this->trait->insert('test_users', [
+            'name' => 'Compose A',
+            'email' => 'compose-a@example.com',
+            'status' => 'active',
+        ]);
+        $this->trait->insert('test_users', [
+            'name' => 'Compose B',
+            'email' => 'compose-b@example.com',
+            'status' => 'pending',
+        ]);
+
+        $rows = $this->trait->selectCompose('test_users', [
+            ['select' => ['id', 'name', 'status'], 'where' => ['status' => 'active']],
+        ], 'ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame($idActive, (int)$rows[0]['id']);
+        $this->assertSame('Compose A', $rows[0]['name']);
+    }
+
+    public function testSelectComposeWithJoinAndOptionalFilterFragment(): void
+    {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS test_profiles (
+                user_id INT PRIMARY KEY,
+                bio TEXT
+            )
+        ");
+        $id = $this->trait->insert('test_users', [
+            'name' => 'Join Compose',
+            'email' => 'join-compose@example.com',
+            'status' => 'active',
+        ]);
+        $this->pdo->exec("INSERT INTO test_profiles (user_id, bio) VALUES ({$id}, 'Bio text')");
+
+        $fragments = [
+            [
+                'select' => ['test_users.id', 'test_users.name', 'test_profiles.bio'],
+                'joins' => ['LEFT JOIN test_profiles ON test_profiles.user_id = test_users.id'],
+            ],
+            ['where' => ['test_users.status' => 'active']],
+        ];
+        if (true) {
+            $fragments[] = ['where' => ['test_users.id' => $id]];
+        }
+
+        $rows = $this->trait->selectCompose('test_users', $fragments)->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('Bio text', $rows[0]['bio']);
+    }
+
+    public function testSelectComposeRawWhereNamedBindingsAndInList(): void
+    {
+        $ids = [];
+        foreach (['X', 'Y', 'Z'] as $i => $name) {
+            $ids[] = $this->trait->insert('test_users', [
+                'name' => "Compose {$name}",
+                'email' => "compose-{$name}@example.com",
+                'status' => $i === 2 ? 'pending' : 'active',
+            ]);
+        }
+
+        $rows = $this->trait->selectCompose('test_users', [
+            ['select' => ['id', 'name']],
+            [
+                'where' => ['(status = :status AND id IN (:ids))'],
+                'bindings' => [':status' => 'active', ':ids' => [$ids[0], $ids[1]]],
+            ],
+        ], 'ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(2, $rows);
+        $this->assertSame(['Compose X', 'Compose Y'], array_column($rows, 'name'));
+    }
 } 

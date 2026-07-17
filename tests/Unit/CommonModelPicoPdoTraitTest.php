@@ -635,6 +635,36 @@ class CommonModelPicoPdoTraitTest extends TestCase
         };
     }
 
+    /**
+     * Trait host with public selectCompose() that records the last SQL + params handed to prepExec.
+     */
+    private function newSelectComposeCapturer(): object
+    {
+        return new class ($this->pdo) {
+            use CommonModelPicoPdoTrait {
+                selectCompose as public;
+                prepExec as traitPrepExec;
+            }
+
+            public string $lastSql = '';
+
+            /** @var array<string|int, mixed> */
+            public array $lastParams = [];
+
+            public function __construct(PDO $pdo)
+            {
+                $this->pdo = $pdo;
+            }
+
+            protected function prepExec(string $sql, array|string|int|null $params = null): PDOStatement
+            {
+                $this->lastSql = $sql;
+                $this->lastParams = (array)$params;
+                return $this->traitPrepExec($sql, $params);
+            }
+        };
+    }
+
     public function testBuildUpdateSqlPartsSingleRowUsesCaseSyntax(): void
     {
         // buildUpdateSqlParts always emits CASE/WHEN — a batch of one is still a batch.
@@ -1080,5 +1110,174 @@ class CommonModelPicoPdoTraitTest extends TestCase
         );
         $this->assertSame('(id = :b0_w_id) OR (id = :b1_w_id)', $where);
         $this->assertSame([':b0_w_id' => 1, ':b0_s0_name' => 'A', ':b1_w_id' => 2, ':b1_s0_name' => 'B'], $params);
+    }
+
+    // ——— selectCompose ———
+
+    public function testSelectComposeMergesSelectWhereAndSqlTail(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec("INSERT INTO {$t} (id, name, status) VALUES (1, 'Alice', 'active'), (2, 'Bob', 'pending')");
+        $trait = $this->newSelectComposeCapturer();
+
+        $rows = $trait->selectCompose($t, [
+            ['select' => ['id', 'name'], 'where' => ['status' => 'active']],
+        ], 'ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertSame("SELECT id, name FROM {$t} WHERE (status = :frag_0_status) ORDER BY id", $trait->lastSql);
+        $this->assertSame([':frag_0_status' => 'active'], $trait->lastParams);
+        $this->assertCount(1, $rows);
+        $this->assertSame('Alice', $rows[0]['name']);
+    }
+
+    public function testSelectComposeAppendsJoinsAndDedupesSelectAndJoinLines(): void
+    {
+        $u = self::TABLE_USERS;
+        $p = self::TABLE_PROFILES;
+        $this->pdo->exec("INSERT INTO {$u} (id, name, status) VALUES (1, 'Alice', 'active')");
+        $this->pdo->exec("INSERT INTO {$p} (user_id, bio) VALUES (1, 'Hello')");
+        $trait = $this->newSelectComposeCapturer();
+        $join = "LEFT JOIN {$p} ON {$p}.user_id = {$u}.id";
+
+        $rows = $trait->selectCompose($u, [
+            ['select' => ["{$u}.id", "{$u}.name"], 'joins' => [$join]],
+            // Exact duplicate select/join lines are removed; email is new.
+            ['select' => ["{$u}.name", "{$u}.email", "{$p}.bio"], 'joins' => [$join]],
+            ['where' => ["{$u}.status" => 'active']],
+        ])->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertSame(
+            "SELECT {$u}.id, {$u}.name, {$u}.email, {$p}.bio FROM {$u}" . PHP_EOL . "{$join} WHERE ({$u}.status = :frag_2_unit_trait_users_dot_status)",
+            $trait->lastSql
+        );
+        $this->assertCount(1, $rows);
+        $this->assertSame('Hello', $rows[0]['bio']);
+    }
+
+    public function testSelectComposeAndJoinsParenthesizedWhereGroupsFromEachFragment(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status, email_verified, created_at) VALUES
+             (1, 'Alice', 'active', 1, '2024-06-01'),
+             (2, 'Bob', 'active', 0, '2024-06-01'),
+             (3, 'Carol', 'pending', 1, '2024-06-01')"
+        );
+        $trait = $this->newSelectComposeCapturer();
+        $since = '2024-01-01';
+
+        $rows = $trait->selectCompose($t, [
+            ['select' => ['id', 'name'], 'where' => ['status' => 'active', 'email_verified != 0']],
+            ['where' => ['created_at > ?' => $since]],
+        ])->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertSame(
+            "SELECT id, name FROM {$t} WHERE (status = :frag_0_status AND email_verified != 0) AND (created_at > :frag_1_0)",
+            $trait->lastSql
+        );
+        $this->assertSame([':frag_0_status' => 'active', ':frag_1_0' => $since], $trait->lastParams);
+        $this->assertCount(1, $rows);
+        $this->assertSame('Alice', $rows[0]['name']);
+    }
+
+    public function testSelectComposeNamedBindingsAndInExpansion(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status) VALUES (10, 'A', 'active'), (11, 'B', 'active'), (12, 'C', 'pending')"
+        );
+        $trait = $this->newSelectComposeCapturer();
+
+        $rows = $trait->selectCompose($t, [
+            ['select' => ['id', 'name']],
+            [
+                'where' => ['id IN (:ids)', 'status = :status'],
+                'bindings' => [':ids' => [10, 11], ':status' => 'active'],
+            ],
+        ], 'ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertStringContainsString('id IN (:ids0,:ids1)', $trait->lastSql);
+        $this->assertStringContainsString('status = :status', $trait->lastSql);
+        $this->assertSame(10, $trait->lastParams[':ids0']);
+        $this->assertSame(11, $trait->lastParams[':ids1']);
+        $this->assertSame('active', $trait->lastParams[':status']);
+        $this->assertSame(['A', 'B'], array_column($rows, 'name'));
+    }
+
+    public function testSelectComposeBindingsForSelectOnlyFragment(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec("INSERT INTO {$t} (id, name, status) VALUES (1, 'Alice', 'active')");
+        $trait = $this->newSelectComposeCapturer();
+
+        // Named placeholder lives in SELECT; fragment has no WHERE — bindings still merge through.
+        $rows = $trait->selectCompose($t, [
+            [
+                'select' => ['id', 'name', '(:label) AS tag'],
+                'bindings' => [':label' => 'vip'],
+            ],
+            ['where' => ['id' => 1]],
+        ])->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertStringContainsString('(:label) AS tag', $trait->lastSql);
+        $this->assertSame('vip', $trait->lastParams[':label']);
+        $this->assertSame(1, $trait->lastParams[':frag_1_id']);
+        $this->assertSame('vip', $rows[0]['tag']);
+    }
+
+    public function testSelectComposeEmptySelectFallsBackToStar(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec("INSERT INTO {$t} (id, name, status) VALUES (1, 'Alice', 'active')");
+        $trait = $this->newSelectComposeCapturer();
+
+        $rows = $trait->selectCompose($t, [
+            ['where' => ['id' => 1]],
+        ])->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertSame("SELECT * FROM {$t} WHERE (id = :frag_0_id)", $trait->lastSql);
+        $this->assertSame('Alice', $rows[0]['name']);
+    }
+
+    public function testSelectComposeOptionalFragmentOmitted(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status) VALUES (1, 'Alice', 'active'), (2, 'Bob', 'pending')"
+        );
+        $trait = $this->newSelectComposeCapturer();
+
+        $core = ['select' => ['id', 'name']];
+        $statusFilter = ['where' => ['status' => 'active']];
+        $extraFilter = null; // caller omits optional piece
+
+        $fragments = array_values(array_filter([$core, $statusFilter, $extraFilter]));
+        $rows = $trait->selectCompose($t, $fragments)->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertCount(1, $rows);
+        $this->assertSame('Alice', $rows[0]['name']);
+        $this->assertStringNotContainsString('frag_2_', $trait->lastSql);
+    }
+
+    public function testSelectComposeLaterFragmentWinsOnDuplicateBindingName(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec("INSERT INTO {$t} (id, name, status) VALUES (1, 'Alice', 'active')");
+        $trait = $this->newSelectComposeCapturer();
+
+        // Same user-supplied :label in two fragments — array_merge keeps the later value.
+        $rows = $trait->selectCompose($t, [
+            [
+                'select' => ['id', '(:label) AS tag'],
+                'bindings' => [':label' => 'first'],
+            ],
+            [
+                'where' => ['id = :label'],
+                'bindings' => [':label' => 1],
+            ],
+        ])->fetchAll(PDO::FETCH_ASSOC);
+
+        $this->assertSame(1, $trait->lastParams[':label']);
+        $this->assertSame('1', (string)$rows[0]['tag']);
     }
 }
