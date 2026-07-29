@@ -533,8 +533,8 @@ Each documented code example in the trait PHPDoc and this README has a matching 
 `tests/Unit/CommonModelPicoPdoTraitTest.php` (unit). Test names are prefixed with `testDoc`.
 
 Current test coverage (`make test` prints a text summary; `make test-coverage` generates HTML):
-- **217 tests** (87 unit, 130 integration)
-- **522 assertions**
+- **229 tests** (96 unit, 133 integration)
+- **562 assertions**
 - **100%** lines and methods on `CommonModelPicoPdoTrait` (Xdebug)
 
 ```bash

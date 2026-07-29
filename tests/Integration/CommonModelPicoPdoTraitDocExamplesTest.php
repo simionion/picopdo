@@ -741,6 +741,55 @@ class CommonModelPicoPdoTraitDocExamplesTest extends TestCase
         $this->assertSame(2, $this->db->delete(self::TABLE_USERS, 'id IN (:ids)', [':ids' => $ids]));
     }
 
+    public function testDocDeleteBatchCompositeKeys(): void
+    {
+        // Mirrors the kurs_teilnehmer-style batch delete example (list of WHERE maps → OR groups).
+        $id1 = $this->seedUser('BatchDel1', 'batch-del-1@example.com', [
+            'status' => 'inactive',
+            'email_verified' => 0,
+            'role' => 'a',
+        ]);
+        $id2 = $this->seedUser('BatchDel2', 'batch-del-2@example.com', [
+            'status' => 'inactive',
+            'email_verified' => 0,
+            'role' => 'b',
+        ]);
+        $keepId = $this->seedUser('BatchKeep', 'batch-del-keep@example.com', [
+            'status' => 'inactive',
+            'email_verified' => 0,
+            'role' => 'c',
+        ]);
+
+        $rows = $this->db->delete(self::TABLE_USERS, [
+            ['id' => $id1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
+            ['id' => $id2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
+        ]);
+
+        $this->assertSame(2, $rows);
+        $this->assertFalse($this->db->exists(self::TABLE_USERS, 'id', $id1));
+        $this->assertFalse($this->db->exists(self::TABLE_USERS, 'id', $id2));
+        $this->assertTrue($this->db->exists(self::TABLE_USERS, 'id', $keepId));
+    }
+
+    public function testDocDeleteBatchQuestionMarkKeysWithSqlTail(): void
+    {
+        $ids = [
+            $this->seedUser('Lim1', 'batch-lim-1@example.com'),
+            $this->seedUser('Lim2', 'batch-lim-2@example.com'),
+            $this->seedUser('Lim3', 'batch-lim-3@example.com'),
+        ];
+
+        $rows = $this->db->delete(self::TABLE_USERS, [
+            ['id = ?' => $ids[0]],
+            ['id = ?' => $ids[1]],
+            ['id = ?' => $ids[2]],
+        ], null, 'LIMIT 2');
+
+        $this->assertSame(2, $rows);
+        $remaining = $this->db->selectAll(self::TABLE_USERS, 'id', 'id IN (:ids)', [':ids' => $ids]);
+        $this->assertCount(1, $remaining);
+    }
+
     // ——— README Key Features ———
 
     public function testDocReadmeAutoQuestionMarkConversion(): void

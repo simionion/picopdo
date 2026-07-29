@@ -286,6 +286,8 @@ trait CommonModelPicoPdoTrait
      * ```
      *  Rows with different shapes are inserted in separate batches.
      *
+     *  Rows without columns are skipped, so an empty payload is a no-op returning 0 (or status 'noop').
+     *
      * @param string $table Table name
      * @param DataMap|list<DataMap> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @param array<string, mixed>|null $options Additional options for the insert operation
@@ -704,6 +706,7 @@ trait CommonModelPicoPdoTrait
         $select = array_values(array_unique($select));
         $joins = array_values(array_unique($joins));
 
+
         return $this->select(
             implode(PHP_EOL, [$table, ...$joins]),
             $select ?: null,
@@ -737,17 +740,36 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->delete('users', 'id IN (:ids)', [':ids' => [1, 2, 3]]);
      * ```
+     * Batch delete (list of WHERE maps / conditions — one OR-group per entry):
+     * ```
+     * $db->delete('kurs_teilnehmer', [
+     *     ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 3, 'mannschaft_id' => 4],
+     *     ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 5, 'mannschaft_id' => 6],
+     * ]);
+     * // DELETE FROM kurs_teilnehmer WHERE (kurspool_id = … AND …) OR (kurspool_id = … AND …)
+     * ```
+     * Batch with per-row bindings + sqlTail:
+     * ```
+     * $db->delete('users', [
+     *     ['id = ?' => 1],
+     *     ['id = ?' => 2],
+     * ], null, 'LIMIT 10');
+     * ```
      *
      * @param string $table Table name
-     * @param string|DataMap $where Column name, condition string, or associative array
-     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
-     * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
+     * @param string|DataMap|list<DataMap|string> $where Column/condition (single), assoc map, or list of maps/conditions (batch)
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings Value / map for single; per-row list when batch
+     * @param string|null $sqlTail Extra query suffix (e.g. ORDER BY, LIMIT)
      * @return int Number of affected rows
      * @throws PDOException
      */
     protected function delete(string $table, string|array $where, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
-        [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
+        if (is_array($where) && $where !== [] && array_is_list($where) && $where === array_filter($where, is_array(...))) {
+            [$whereClause, $params] = $this->buildDeleteSqlParts($where, $bindings);
+        } else {
+            [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
+        }
         $whereClause = str_contains($whereClause, 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
         $sql = implode(' ', array_filter(array_map(trim(...), ['DELETE FROM', $table, $whereClause, (string)$sqlTail])));
         return $this->prepExec($sql, $params)->rowCount();
@@ -1054,6 +1076,11 @@ trait CommonModelPicoPdoTrait
     {
         $batches = [];
         foreach ($rows as $i => $row) {
+            if ($row === []) {
+                // No columns to set: skip instead of emitting `INSERT INTO t () VALUES ()`, which
+                // would insert an all-defaults row.
+                continue;
+            }
             $columns = $values = $params = [];
             foreach ($row as $key => $value) {
                 if (is_numeric($key)) {
@@ -1090,6 +1117,30 @@ trait CommonModelPicoPdoTrait
             && is_array($where) && array_is_list($where) && count($where) === count($data)
             && $data === array_filter($data, is_array(...))
             && $where === array_filter($where, static fn($w) => is_array($w) || is_string($w));
+    }
+
+
+    /**
+     * Compiles parallel delete WHERE rows into [WHERE clause, params] for batch {@see delete()}.
+     *
+     * @param list<DataMap|string> $whereRows
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings
+     * @return array{0: string, 1: BindingsMap}
+     */
+    private function buildDeleteSqlParts(array $whereRows, int|string|array|null $bindings): array
+    {
+        $params = [];
+        $wheres = [];
+        foreach ($whereRows as $i => $row) {
+            $rowBindings = is_array($bindings) && array_is_list($bindings) ? ($bindings[$i] ?? null) : $bindings;
+            [$wheres[$i], $whereParams] = $this->buildWhereQuery($row, $rowBindings, "b{$i}_w_");
+            $params += $whereParams;
+        }
+
+        return [
+            implode(' OR ', array_map(static fn(string $w): string => "({$w})", $wheres)),
+            $params,
+        ];
     }
 
 

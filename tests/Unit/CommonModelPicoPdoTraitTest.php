@@ -617,10 +617,14 @@ class CommonModelPicoPdoTraitTest extends TestCase
         return new class ($this->pdo) {
             use CommonModelPicoPdoTrait {
                 update as public;
+                delete as public;
                 prepExec as traitPrepExec;
             }
 
             public string $lastSql = '';
+
+            /** @var array<string|int, mixed> */
+            public array $lastParams = [];
 
             public function __construct(PDO $pdo)
             {
@@ -630,6 +634,7 @@ class CommonModelPicoPdoTraitTest extends TestCase
             protected function prepExec(string $sql, array|string|int|null $params = null): PDOStatement
             {
                 $this->lastSql = $sql;
+                $this->lastParams = (array)$params;
                 return $this->traitPrepExec($sql, $params);
             }
         };
@@ -788,6 +793,192 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $this->assertTrue($method->invoke($this, [['name' => 'A'], ['name' => 'B']], [['id' => 1], ['id' => 2]]));
         $this->assertFalse($method->invoke($this, ['not-a-map'], [['id' => 1]]));
         $this->assertFalse($method->invoke($this, [['name' => 'a']], [123]));
+    }
+
+    // ——— batch delete ———
+
+    public function testBuildDeleteSqlPartsOrJoinsParenthesizedRowConditions(): void
+    {
+        $method = new \ReflectionMethod(self::class, 'buildDeleteSqlParts');
+        $method->setAccessible(true);
+        [$where, $params] = $method->invoke($this, [
+            ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 3, 'mannschaft_id' => 4],
+            ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 5, 'mannschaft_id' => 6],
+        ], null);
+
+        $this->assertSame(
+            '(kurspool_id = :b0_w_kurspool_id AND kurs_id = :b0_w_kurs_id AND fw_id = :b0_w_fw_id AND mannschaft_id = :b0_w_mannschaft_id)'
+            . ' OR (kurspool_id = :b1_w_kurspool_id AND kurs_id = :b1_w_kurs_id AND fw_id = :b1_w_fw_id AND mannschaft_id = :b1_w_mannschaft_id)',
+            $where
+        );
+        $this->assertSame(1, $params[':b0_w_kurspool_id']);
+        $this->assertSame(4, $params[':b0_w_mannschaft_id']);
+        $this->assertSame(5, $params[':b1_w_fw_id']);
+        $this->assertSame(6, $params[':b1_w_mannschaft_id']);
+    }
+
+    public function testBuildDeleteSqlPartsPerRowBindingsAndQuestionMarkKeys(): void
+    {
+        $method = new \ReflectionMethod(self::class, 'buildDeleteSqlParts');
+        $method->setAccessible(true);
+        // buildDeleteSqlParts accepts string rows; delete() itself only batches a list of maps.
+        [$where, $params] = $method->invoke($this, [
+            ['id = ?' => 10],
+            'status = ? AND email_verified != 0',
+            ['created_at > :since'],
+        ], [
+            null,
+            ['active'],
+            [':since' => '2024-01-01'],
+        ]);
+
+        $this->assertSame(
+            '(id = :b0_w_0) OR (status = :b1_w_0 AND email_verified != 0) OR (created_at > :since)',
+            $where
+        );
+        $this->assertSame(10, $params[':b0_w_0']);
+        $this->assertSame('active', $params[':b1_w_0']);
+        $this->assertSame('2024-01-01', $params[':since']);
+    }
+
+    public function testBatchDeleteRunsAgainstMysqlWithOrGroups(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status, email_verified) VALUES
+             (80, 'A', 'inactive', 0),
+             (81, 'B', 'inactive', 0),
+             (82, 'C', 'active', 1)"
+        );
+        $trait = $this->newUpdateSqlCapturer();
+
+        $rows = $trait->delete($t, [
+            ['id' => 80, 'status' => 'inactive'],
+            ['id' => 81, 'status' => 'inactive'],
+        ]);
+
+        $this->assertSame(2, $rows);
+        $this->assertSame(
+            "DELETE FROM {$t} WHERE (id = :b0_w_id AND status = :b0_w_status) OR (id = :b1_w_id AND status = :b1_w_status)",
+            $trait->lastSql
+        );
+        $this->assertSame(0, (int)$this->pdo->query("SELECT COUNT(*) FROM {$t} WHERE id IN (80, 81)")->fetchColumn());
+        $this->assertSame(1, (int)$this->pdo->query("SELECT COUNT(*) FROM {$t} WHERE id = 82")->fetchColumn());
+    }
+
+    public function testBatchDeleteWithInlineQuestionMarkKeysAndSqlTail(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status) VALUES (83, 'D1', 'x'), (84, 'D2', 'x'), (85, 'D3', 'x')"
+        );
+        $trait = $this->newUpdateSqlCapturer();
+
+        // Mirrors the batch + sqlTail PHPDoc example; LIMIT caps total rows deleted.
+        $rows = $trait->delete($t, [
+            ['id = ?' => 83],
+            ['id = ?' => 84],
+            ['id = ?' => 85],
+        ], null, 'LIMIT 2');
+
+        $this->assertSame(2, $rows);
+        $this->assertStringEndsWith('LIMIT 2', $trait->lastSql);
+        $this->assertStringContainsString('(id = :b0_w_0) OR (id = :b1_w_0) OR (id = :b2_w_0)', $trait->lastSql);
+        $this->assertSame(1, (int)$this->pdo->query("SELECT COUNT(*) FROM {$t} WHERE id IN (83, 84, 85)")->fetchColumn());
+    }
+
+    public function testBatchDeletePerRowNamedBindings(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status, created_at) VALUES
+             (86, 'E1', 'inactive', '2024-06-01'),
+             (87, 'E2', 'inactive', '2024-06-01'),
+             (88, 'Keep', 'active', '2024-06-01')"
+        );
+        $trait = $this->newUpdateSqlCapturer();
+
+        $rows = $trait->delete($t, [
+            ['id' => 86, 'created_at > :since'],
+            ['id' => 87, 'created_at > :since'],
+        ], [
+            [':since' => '2024-01-01'],
+            [':since' => '2024-01-01'],
+        ]);
+
+        $this->assertSame(2, $rows);
+        // User `:since` is not row-scoped on delete — same name, same value is fine.
+        $this->assertStringContainsString('created_at > :since', $trait->lastSql);
+        $this->assertSame('2024-01-01', $trait->lastParams[':since']);
+        $this->assertSame(1, (int)$this->pdo->query("SELECT COUNT(*) FROM {$t} WHERE id = 88")->fetchColumn());
+    }
+
+    public function testListOfRawSqlFragmentsIsNotBatchDelete(): void
+    {
+        // A list of strings stays on the classic AND path (batch delete requires a list of maps).
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status, email_verified) VALUES (89, 'Raw', 'inactive', 0)"
+        );
+        $trait = $this->newUpdateSqlCapturer();
+
+        $rows = $trait->delete($t, ['status = \'inactive\'', 'email_verified = 0']);
+
+        $this->assertSame(1, $rows);
+        $this->assertSame(
+            "DELETE FROM {$t} WHERE status = 'inactive' AND email_verified = 0",
+            $trait->lastSql
+        );
+        $this->assertStringNotContainsString(' OR ', $trait->lastSql);
+    }
+
+    public function testAssociativeWhereMapIsNotBatchDelete(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec("INSERT INTO {$t} (id, name, status) VALUES (90, 'Assoc', 'inactive')");
+        $trait = $this->newUpdateSqlCapturer();
+
+        $rows = $trait->delete($t, ['id' => 90, 'status' => 'inactive']);
+
+        $this->assertSame(1, $rows);
+        $this->assertSame(
+            "DELETE FROM {$t} WHERE id = :where_id AND status = :where_status",
+            $trait->lastSql
+        );
+    }
+
+    public function testBatchDeleteSharedNamedBindingsAcrossRows(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec(
+            "INSERT INTO {$t} (id, name, status, created_at) VALUES
+             (91, 'S1', 'inactive', '2024-06-01'),
+             (92, 'S2', 'inactive', '2024-06-01')"
+        );
+        $trait = $this->newUpdateSqlCapturer();
+
+        // Non-list $bindings is shared by every batch row.
+        $rows = $trait->delete($t, [
+            ['id' => 91, 'created_at > :since'],
+            ['id' => 92, 'created_at > :since'],
+        ], [':since' => '2024-01-01']);
+
+        $this->assertSame(2, $rows);
+        $this->assertSame('2024-01-01', $trait->lastParams[':since']);
+    }
+
+    public function testBuildInsertBatchesSkipsEmptyRows(): void
+    {
+        $method = new \ReflectionMethod(self::class, 'buildInsertBatches');
+        $method->setAccessible(true);
+        $batches = $method->invoke($this, [
+            [],
+            ['name' => 'Only'],
+            [],
+        ]);
+
+        $this->assertCount(1, $batches);
+        $this->assertSame([':row_1_name' => 'Only'], $batches['name'][2]);
     }
 
     public function testBatchUpdateWithColumnShorthandWhereList(): void

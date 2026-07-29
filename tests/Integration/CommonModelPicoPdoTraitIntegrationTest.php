@@ -1529,4 +1529,33 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertCount(2, $rows);
         $this->assertSame(['Compose X', 'Compose Y'], array_column($rows, 'name'));
     }
+
+    public function testBatchDeleteCompositeWhereMaps(): void
+    {
+        $id1 = $this->trait->insert('test_users', [
+            'name' => 'Del A',
+            'email' => 'batch-del-a@example.com',
+            'status' => 'inactive',
+        ]);
+        $id2 = $this->trait->insert('test_users', [
+            'name' => 'Del B',
+            'email' => 'batch-del-b@example.com',
+            'status' => 'inactive',
+        ]);
+        $keep = $this->trait->insert('test_users', [
+            'name' => 'Keep',
+            'email' => 'batch-del-keep@example.com',
+            'status' => 'active',
+        ]);
+
+        $rows = $this->trait->delete('test_users', [
+            ['id' => $id1, 'status' => 'inactive'],
+            ['id' => $id2, 'status' => 'inactive'],
+        ]);
+
+        $this->assertSame(2, $rows);
+        $this->assertFalse($this->trait->exists('test_users', 'id', $id1));
+        $this->assertFalse($this->trait->exists('test_users', 'id', $id2));
+        $this->assertTrue($this->trait->exists('test_users', 'id', $keep));
+    }
 } 
