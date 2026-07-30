@@ -802,19 +802,19 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $method = new \ReflectionMethod(self::class, 'buildDeleteSqlParts');
         $method->setAccessible(true);
         [$where, $params] = $method->invoke($this, [
-            ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 3, 'mannschaft_id' => 4],
-            ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 5, 'mannschaft_id' => 6],
+            ['id' => 1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
+            ['id' => 2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
         ], null);
 
         $this->assertSame(
-            '(kurspool_id = :b0_w_kurspool_id AND kurs_id = :b0_w_kurs_id AND fw_id = :b0_w_fw_id AND mannschaft_id = :b0_w_mannschaft_id)'
-            . ' OR (kurspool_id = :b1_w_kurspool_id AND kurs_id = :b1_w_kurs_id AND fw_id = :b1_w_fw_id AND mannschaft_id = :b1_w_mannschaft_id)',
+            '(id = :b0_w_id AND status = :b0_w_status AND email_verified = :b0_w_email_verified AND role = :b0_w_role)'
+            . ' OR (id = :b1_w_id AND status = :b1_w_status AND email_verified = :b1_w_email_verified AND role = :b1_w_role)',
             $where
         );
-        $this->assertSame(1, $params[':b0_w_kurspool_id']);
-        $this->assertSame(4, $params[':b0_w_mannschaft_id']);
-        $this->assertSame(5, $params[':b1_w_fw_id']);
-        $this->assertSame(6, $params[':b1_w_mannschaft_id']);
+        $this->assertSame(1, $params[':b0_w_id']);
+        $this->assertSame('a', $params[':b0_w_role']);
+        $this->assertSame(2, $params[':b1_w_id']);
+        $this->assertSame('b', $params[':b1_w_role']);
     }
 
     public function testBuildDeleteSqlPartsPerRowBindingsAndQuestionMarkKeys(): void
@@ -1470,5 +1470,113 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
         $this->assertSame(1, $trait->lastParams[':label']);
         $this->assertSame('1', (string)$rows[0]['tag']);
+    }
+
+    // ——— pdo() / withAtomicChunks coverage ———
+
+    public function testPdoResolverPrefersLegacyDbProperty(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec("INSERT INTO {$t} (id, name) VALUES (1, 'ViaDb')");
+
+        // Legacy models expose the handle as `$db` and leave `$pdo` uninitialised.
+        $host = new class ($this->pdo) {
+            use CommonModelPicoPdoTrait {
+                exists as public;
+                pdo as public resolvePdo;
+            }
+
+            protected PDO $db;
+
+            public function __construct(PDO $pdo)
+            {
+                $this->db = $pdo;
+            }
+        };
+
+        $this->assertSame($this->pdo, $host->resolvePdo());
+        $this->assertTrue($host->exists($t, 'id', 1));
+    }
+
+    public function testWithAtomicChunksRollsBackOwnedTransactionWhenWorkThrows(): void
+    {
+        $t = self::TABLE_USERS;
+        $host = new class ($this->pdo) {
+            use CommonModelPicoPdoTrait {
+                prepExec as public;
+            }
+
+            public function __construct(PDO $pdo)
+            {
+                $this->pdo = $pdo;
+            }
+
+            /** Exposes {@see withAtomicChunks()} for a focused rollback test. */
+            public function runAtomicChunks(int $chunkCount, callable $work): mixed
+            {
+                return $this->withAtomicChunks($chunkCount, $work);
+            }
+        };
+
+        try {
+            $host->runAtomicChunks(2, static function () use ($host, $t): void {
+                $host->prepExec("INSERT INTO {$t} (id, name) VALUES (991, 'atomic-rollback')");
+                throw new \RuntimeException('chunk boom');
+            });
+            $this->fail('Expected RuntimeException');
+        } catch (\RuntimeException $e) {
+            $this->assertSame('chunk boom', $e->getMessage());
+        }
+
+        $this->assertSame(
+            0,
+            (int)$this->pdo->query("SELECT COUNT(*) FROM {$t} WHERE id = 991")->fetchColumn(),
+            'Owned transaction must roll back work done before the throw'
+        );
+    }
+
+    public function testRollBackChunkTransactionIfOwnedRollsBackWhenOwned(): void
+    {
+        $host = new class ($this->pdo) {
+            use CommonModelPicoPdoTrait {
+                prepExec as public;
+            }
+
+            public function __construct(PDO $pdo)
+            {
+                $this->pdo = $pdo;
+            }
+        };
+
+        $t = self::TABLE_USERS;
+        $this->pdo->beginTransaction();
+        $host->prepExec("INSERT INTO {$t} (id, name) VALUES (993, 'owned-rb')");
+
+        $method = new \ReflectionMethod($host, 'rollBackChunkTransactionIfOwned');
+        $method->setAccessible(true);
+        $method->invoke($host, true);
+
+        $this->assertFalse($this->pdo->inTransaction());
+        $this->assertSame(
+            0,
+            (int)$this->pdo->query("SELECT COUNT(*) FROM {$t} WHERE id = 993")->fetchColumn()
+        );
+    }
+
+    public function testRollBackChunkTransactionIfOwnedNoopsWhenNotOwned(): void
+    {
+        $host = new class ($this->pdo) {
+            use CommonModelPicoPdoTrait;
+
+            public function __construct(PDO $pdo)
+            {
+                $this->pdo = $pdo;
+            }
+        };
+
+        $method = new \ReflectionMethod($host, 'rollBackChunkTransactionIfOwned');
+        $method->setAccessible(true);
+        $method->invoke($host, false);
+        $this->assertFalse($this->pdo->inTransaction());
     }
 }

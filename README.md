@@ -10,11 +10,12 @@ A lightweight PDO trait for PHP models that provides common database operations 
 - **Raw SQL in arrays** - Use numeric keys for raw SQL strings
 - **Keys with `?` placeholders** - Direct binding syntax: `['date > ?' => $date]`
 - **INSERT modes** - INSERT, REPLACE, INSERT IGNORE, ON DUPLICATE KEY UPDATE
+- **Packet-safe batching** - oversized INSERT / UPDATE / DELETE batches are split under a 16 MiB `max_allowed_packet` budget; multi-chunk work runs in one owned transaction (all-or-nothing)
 - **100% test coverage** across unit and integration tests
 
 ## Requirements
 
-- PHP 8.2 or higher
+- PHP 8.3 or higher
 - PDO PHP extension
 - MariaDB/MySQL
 
@@ -134,6 +135,44 @@ $users = $model->selectAll('users', ['name', 'email'], ['status' => 'active']);
 $users = $model->selectAll('users', ['name'], ['status' => 'active'], null, 'ORDER BY name LIMIT 10');
 ```
 
+### INSERT
+
+```php
+// Single row (raw SQL columns use a numeric key)
+$id = $model->insert('users', [
+    'name' => 'John',
+    'email' => 'john@example.com',
+    'created_at = NOW()',
+]);
+
+// Batch — one multi-value INSERT for rows that share the same columns
+$model->insert('users', [
+    ['name' => 'Ion', 'email' => 'ion@example.com', 'created_at = NOW()', 'is_active' => 1],
+    ['name' => 'Ani', 'email' => 'ani@example.com', 'created_at = NOW()', 'is_active' => 0],
+]);
+
+// Mixed column shapes still work in one call — each shape becomes its own INSERT
+$model->insert('users', [
+    ['name' => 'Ion', 'email' => 'ion-mixed@example.com'],
+    ['name' => 'Ani', 'email' => 'ani-mixed@example.com', 'role' => 'admin'],
+]);
+
+// Build from a list, then insert once
+$incoming = [
+    ['name' => 'Loop A', 'email' => 'loop-a@example.com', 'status' => 'pending'],
+    ['name' => 'Loop B', 'email' => 'loop-b@example.com', 'status' => 'pending'],
+];
+$rows = [];
+foreach ($incoming as $user) {
+    $rows[] = [
+        'name' => $user['name'],
+        'email' => $user['email'],
+        'status' => $user['status'],
+    ];
+}
+$model->insert('users', $rows);
+```
+
 ### UPDATE
 
 ```php
@@ -149,8 +188,23 @@ $affected = $model->update('users',
 // With a SQL tail (applies to the whole statement)
 $affected = $model->update('users', ['status' => 'archived'], ['status' => 'inactive'], null, 'ORDER BY id LIMIT 10');
 
-// Batch (one query, parallel lists — build in a loop, then pass both)
-// Generated as CASE WHEN per column; single updates keep classic `SET col = :set_col` SQL.
+// Batch — parallel `$data` / `$where` lists (same index = same row).
+// Compiles to one CASE WHEN statement per column.
+$data = [
+    ['name' => 'New A', 'status' => 'pending'],
+    ['name' => 'New B', 'status' => 'pending'],
+];
+$where = [
+    ['id' => 1],
+    ['id' => 2],
+];
+$affected = $model->update('users', $data, $where);
+
+// Same idea when the input arrives as a list of records
+$rows = [
+    ['id' => 1, 'name' => 'New A', 'status' => 'pending'],
+    ['id' => 2, 'name' => 'New B', 'status' => 'pending'],
+];
 $data = [];
 $where = [];
 foreach ($rows as $row) {
@@ -166,6 +220,13 @@ $affected = $model->update('users', $data, $where);
 ```php
 $affected = $model->delete('users', 'id', 1);
 $affected = $model->delete('users', ['status' => 'inactive', 'email_verified' => 0]);
+
+// Batch — list of WHERE maps; each map is an AND-group, maps are OR'd together
+$affected = $model->delete('users', [
+    ['id' => 1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
+    ['id' => 2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
+]);
+// → DELETE … WHERE (id = 1 AND status = 'inactive' AND …) OR (id = 2 AND …)
 ```
 
 ### EXISTS
@@ -369,20 +430,55 @@ if ($model->exists('users', ['email' => $email, 'status' => 'active'])) { ... }
 
 ### Step 8 — INSERT (single row → batch)
 
+**Single row** — columns bind automatically; raw SQL uses a numeric key:
+
 ```php
-// Single row
-$id = $model->insert('users', ['name' => 'John', 'created_at = NOW()']);
-
-// Many rows — one INSERT per distinct column shape
-$model->insert('users', [
-    ['name' => 'A', 'email' => 'a@x.com'],
-    ['name' => 'B', 'email' => 'b@x.com', 'role' => 'admin'],
+$id = $model->insert('users', [
+    'name' => 'John',
+    'email' => 'john@example.com',
+    'created_at = NOW()',
 ]);
-
-// Variants: insertReplace(), insertIgnore(), insertOnDuplicateKeyUpdate()
 ```
 
-**Use batch INSERT** when inserting many rows with the same (or grouped) column sets. **Use `prepExec()`** for one-off SQL the helpers do not generate.
+**Batch (same columns)** — one multi-value `INSERT`:
+
+```php
+$model->insert('users', [
+    ['name' => 'Ion', 'email' => 'ion@example.com', 'created_at = NOW()', 'is_active' => 1],
+    ['name' => 'Ani', 'email' => 'ani@example.com', 'created_at = NOW()', 'is_active' => 0],
+]);
+```
+
+**Batch (mixed shapes)** — still one call; each distinct column set becomes its own statement:
+
+```php
+$model->insert('users', [
+    ['name' => 'Ion', 'email' => 'ion-mixed@example.com'],
+    ['name' => 'Ani', 'email' => 'ani-mixed@example.com', 'role' => 'admin'],
+]);
+```
+
+**From a list** — map incoming rows, then insert once:
+
+```php
+$incoming = [
+    ['name' => 'Loop A', 'email' => 'loop-a@example.com', 'status' => 'pending'],
+    ['name' => 'Loop B', 'email' => 'loop-b@example.com', 'status' => 'pending'],
+];
+$rows = [];
+foreach ($incoming as $user) {
+    $rows[] = [
+        'name' => $user['name'],
+        'email' => $user['email'],
+        'status' => $user['status'],
+    ];
+}
+$model->insert('users', $rows);
+```
+
+Variants: `insertReplace()`, `insertIgnore()`, `insertOnDuplicateKeyUpdate()`.
+
+**Use batch INSERT** when inserting many rows with the same (or grouped) column sets. Very large payloads are split automatically so statements stay under `max_allowed_packet`. **Use `prepExec()`** for one-off SQL the helpers do not generate.
 
 ---
 
@@ -395,11 +491,45 @@ $model->update('users', ['name' => 'John'], 'id', 1);
 $model->update('users', ['name' => 'John'], ['id' => 1, 'status' => 'active']);
 ```
 
-**Batch** — parallel lists for `$data`, `$where`, and optionally `$bindings` (same index = same logical row). One SQL statement with `CASE WHEN` per column:
+**Batch (everyday)** — rename / flip status for several known primary keys in one round-trip:
 
 ```php
-$since = '2024-01-01';
-$teamIds = [10, 11, 12];
+$data = [
+    ['name' => 'New A', 'status' => 'pending'],
+    ['name' => 'New B', 'status' => 'pending'],
+];
+$where = [
+    ['id' => 1],
+    ['id' => 2],
+];
+$model->update('users', $data, $where);
+```
+
+**Batch (from a list)** — build the parallel lists from records:
+
+```php
+$rows = [
+    ['id' => 1, 'name' => 'New A', 'status' => 'pending'],
+    ['id' => 2, 'name' => 'New B', 'status' => 'pending'],
+];
+$data = [];
+$where = [];
+foreach ($rows as $row) {
+    $data[] = ['name' => $row['name'], 'status' => $row['status']];
+    $where[] = ['id' => $row['id']];
+}
+$model->update('users', $data, $where);
+```
+
+**Batch (advanced bindings)** — per-row `$bindings`, raw SQL / `?` keys in SET, mixed WHERE shapes
+(same fixture shape as the doc tests: team ids, Carol, editor Bob, Dave):
+
+```php
+$since = '2024-01-01 00:00:00';
+$teamIds = [10, 11, 12];   // seeded users with email_verified = 1
+$carolId = 3;
+$editorId = 99;            // role = 'editor'
+$daveId = 4;
 
 $data = [
     ['name' => 'Alice', 'views = views + 1'],     // row 0: raw SQL in SET
@@ -408,22 +538,22 @@ $data = [
     ['name' => 'Dave'],                            // row 3: scalar $bindings
 ];
 $where = [
-    ['id' => 1, 'email_verified != 0', 'created_at > :since', 'id IN (:ids)'],
-    ['id' => 3],
+    ['id' => $teamIds[0], 'email_verified != 0', 'created_at > :since', 'id IN (:ids)'],
+    ['id' => $carolId],
     'id = ? AND role = ?',
-    'id = 4 AND created_at > ?',
+    'id = ' . $daveId . ' AND created_at > ?',
 ];
 $bindings = [
     [':since' => $since, ':ids' => $teamIds],  // named map
     null,                                       // self-bound associative WHERE
-    [99, 'editor'],                             // positional list
+    [$editorId, 'editor'],                      // positional list
     $since,                                     // scalar → single `?` in string WHERE
 ];
 
 $model->update('users', $data, $where, $bindings);
 ```
 
-**When to use batch UPDATE:** many rows, each with its own SET + WHERE, in one round-trip. Row conditions should be **mutually exclusive** (usually `id = ?` per row) so `CASE WHEN` does not match the same DB row twice.
+**When to use batch UPDATE:** many rows, each with its own SET + WHERE, in one round-trip. Row conditions should be **mutually exclusive** (usually `id = ?` per row) so `CASE WHEN` does not match the same DB row twice. Oversized batches are chunked the same way as INSERT.
 
 **When to stay on single UPDATE:** one row, or overlapping conditions, or when `prepExec()` is clearer.
 
@@ -437,6 +567,28 @@ Same `$where` / `$bindings` as SELECT; `$where` is required (no accidental full-
 $model->delete('users', 'id', 1);
 $model->delete('users', ['status' => 'inactive', 'created_at > ?' => $cutoff]);
 ```
+
+**Batch** — drop several specific rows (multi-column AND-groups OR'd together):
+
+```php
+$model->delete('users', [
+    ['id' => 1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
+    ['id' => 2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
+]);
+// → WHERE (id = 1 AND status = 'inactive' AND …) OR (id = 2 AND …)
+```
+
+**Batch with `?` keys + sqlTail:**
+
+```php
+$model->delete('users', [
+    ['id = ?' => 1],
+    ['id = ?' => 2],
+    ['id = ?' => 3],
+], null, 'LIMIT 2');
+```
+
+Oversized batch deletes are chunked automatically (same packet budget as INSERT / UPDATE).
 
 ---
 
@@ -524,17 +676,18 @@ $users = $model->selectAll('users', null, ["name LIKE ?", "status = ?"],
 - **Overlapping row conditions** — each column uses `CASE WHEN …`; if one DB row matches more than one batch entry's WHERE, only the **first** matching branch applies. Prefer unique keys per row (e.g. `id`).
 - **Per-row `$bindings`** — parallel lists must align with `$data` / `$where` by index; use `null` when a row needs no external bindings (not `[null]`).
 - **Same `:name`, different values per row** — in one batch statement, a named placeholder has **one** binding; reuse the name only when the value is shared across rows.
-- **Large batches** — very wide `CASE` statements may hit packet or planner limits; chunk if needed.
+- **Large batches** — INSERT / UPDATE / DELETE lists that would exceed `max_allowed_packet` (16 MiB) are split automatically; a single row that alone exceeds the budget still fails at the server. Planner cost on very wide `CASE` statements can remain a concern even when the packet fits.
 
 ## Testing
 
 Each documented code example in the trait PHPDoc and this README has a matching test in
 `tests/Integration/CommonModelPicoPdoTraitDocExamplesTest.php` (integration) and, for SQL helpers,
-`tests/Unit/CommonModelPicoPdoTraitTest.php` (unit). Test names are prefixed with `testDoc`.
+`tests/Unit/CommonModelPicoPdoTraitTest.php` (unit). Packet chunking lives in
+`tests/Unit/CommonModelPicoPdoTraitBatchChunkingTest.php`. Test names for doc examples are prefixed with `testDoc`.
 
 Current test coverage (`make test` prints a text summary; `make test-coverage` generates HTML):
-- **229 tests** (96 unit, 133 integration)
-- **562 assertions**
+- **244 tests** (106 unit, 138 integration)
+- **615 assertions**
 - **100%** lines and methods on `CommonModelPicoPdoTrait` (Xdebug)
 
 ```bash

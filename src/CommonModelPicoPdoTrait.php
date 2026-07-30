@@ -125,6 +125,31 @@ use PDOStatement;
  */
 trait CommonModelPicoPdoTrait
 {
+    /**
+     * Largest statement the server will accept, in bytes (`max_allowed_packet`).
+     *
+     * Overshooting is not recoverable: the server answers 1153 and drops the connection
+     * (`2006 server has gone away`), so an oversized batch cannot be split and retried
+     * afterwards — it has to be split before it is sent.
+     */
+    private const int MAX_ALLOWED_PACKET = 16777216;
+
+    /**
+     * Share of {@see MAX_ALLOWED_PACKET} a batch may fill, measured with `serialize()`.
+     *
+     * `serialize()` only approximates the statement, so the ratio has to absorb the error. The
+     * binding case is a batch UPDATE: its CASE/WHEN scaffolding costs ~24 bytes per row *per
+     * column* (`WHEN (a = 5) THEN 2`), so the statement runs larger the narrower the columns
+     * are. Measured across 1–30 columns the statement peaks at 1.37x its serialized size and
+     * then flattens, which caps the safe fill at 0.73; a multi-row INSERT runs *under* its
+     * serialized size (0.57x), so it is never the constraint.
+     *
+     * 0.5 keeps the worst measured shape near 69% of the packet, leaving room for shapes not
+     * measured. Nothing ordinary is affected: real batches are KB-scale, so the guard only ever
+     * fires on payloads that would otherwise have dropped the connection.
+     */
+    private const float PACKET_FILL_RATIO = 0.5;
+
     protected PDO $pdo;
 
     /**
@@ -341,15 +366,21 @@ trait CommonModelPicoPdoTrait
 
         $onDuplicateKeyUpdate = (array)$config['onDuplicateKeyUpdate'];
         $isMultipleInsert = array_is_list($data) && is_array($data[0] ?? null);
+        $chunks = $this->chunkForPacket($isMultipleInsert ? $data : [$data]);
         $rowCount = 0;
-        foreach ($this->buildInsertBatches($isMultipleInsert ? $data : [$data]) as [$columns, $valueRows, $params]) {
-            $sql = "{$insertMode} INTO {$table} ({$columns}) VALUES " . implode(', ', $valueRows);
-            if ($insertMode === 'INSERT' && $onDuplicateKeyUpdate !== []) {
-                [$updateClause, $params] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_', ', ', $params);
-                $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
+
+        $this->withAtomicChunks(count($chunks), function () use ($chunks, $insertMode, $table, $onDuplicateKeyUpdate, &$rowCount): void {
+            foreach ($chunks as $chunk) {
+                foreach ($this->buildInsertBatches($chunk) as [$columns, $valueRows, $params]) {
+                    $sql = "{$insertMode} INTO {$table} ({$columns}) VALUES " . implode(', ', $valueRows);
+                    if ($insertMode === 'INSERT' && $onDuplicateKeyUpdate !== []) {
+                        [$updateClause, $params] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_', ', ', $params);
+                        $sql .= " ON DUPLICATE KEY UPDATE {$updateClause}";
+                    }
+                    $rowCount += $this->prepExec($sql, $params)->rowCount();
+                }
             }
-            $rowCount += $this->prepExec($sql, $params)->rowCount();
-        }
+        });
 
         $isSuccess = $rowCount > 0;
         $lastInsertId = $this->pdo()->lastInsertId() ?: 0;
@@ -503,7 +534,30 @@ trait CommonModelPicoPdoTrait
     protected function update(string $table, array $data, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
         if ($this->isBatchUpdatePayload($data, $where)) {
-            // Batch: one CASE/WHEN query updating every row at once.
+            // Batch: one CASE/WHEN query per chunk. Each row costs its SET values *and* its own
+            // WHERE, so size the two together, then take the same slice of every parallel input.
+            $chunks = $this->chunkForPacket(array_map(null, $data, $where));
+
+            if (count($chunks) > 1) {
+                $rowCount = 0;
+                $this->withAtomicChunks(count($chunks), function () use ($chunks, &$rowCount, $table, $data, $where, $bindings, $sqlTail): void {
+                    $offset = 0;
+                    foreach ($chunks as $chunk) {
+                        $length = count($chunk);
+                        $rowCount += $this->update(
+                            $table,
+                            $this->chunkList($data, $offset, $length),
+                            $this->chunkList($where, $offset, $length),
+                            $this->chunkList($bindings, $offset, $length),
+                            $sqlTail
+                        );
+                        $offset += $length;
+                    }
+                });
+
+                return $rowCount;
+            }
+
             [$setClause, $whereClause, $params] = $this->buildUpdateSqlParts($data, $where, $bindings);
         } else {
             // Single row: classic UPDATE with the familiar :set_* / :where_* placeholders.
@@ -623,12 +677,12 @@ trait CommonModelPicoPdoTrait
      *
      * ```
      * [
-     *     'select'   => ['event.event_id', 'event.date_start'],
-     *     'joins'    => ['LEFT JOIN event_to_tab ON event_to_tab.event_id = event.event_id'],
+     *     'select'   => ['users.id', 'users.name', 'profiles.bio'],
+     *     'joins'    => ['LEFT JOIN profiles ON profiles.user_id = users.id'],
      *     'where'    => [
-     *         'event.fw_id' => $fwId,
-     *         'event.date_start >= ?' => $dateFrom,
-     *         'event.status != 0',
+     *         'users.status' => 'active',
+     *         'users.created_at >= ?' => $dateFrom,
+     *         'users.email_verified != 0',
      *     ],
      *     'bindings' => [':named' => $value],
      * ]
@@ -645,58 +699,61 @@ trait CommonModelPicoPdoTrait
      *
      * ### Usage examples
      *
-     * Core columns + year/org filter + order:
+     * Core columns + filter + order:
      * ```
      * $db->selectCompose(
-     *     'uebungs_programm LEFT JOIN event ON event.event_id = uebungs_programm.event_id',
+     *     'users',
      *     [
-     *         ['select' => ['event.event_id', 'event.date_start'], 'joins' => ['LEFT JOIN arbeitsrapporte ON …']],
-     *         ['where' => ['event.fw_id' => $fwId, 'event.date_start >= ?' => $yearStart, 'event.date_start < ?' => $yearEnd]],
+     *         ['select' => ['id', 'name', 'status']],
+     *         ['where' => ['status' => 'active']],
      *     ],
-     *     'ORDER BY event.date_start, event.event_id'
+     *     'ORDER BY id'
      * )->fetchAll(PDO::FETCH_ASSOC);
      * ```
      *
      * Optional filter fragment (omit the array entry when not needed):
      * ```
-     * $fragments = [$this->fragCoreListing(), $this->fragWhereYearOrg($year, $fwId)];
+     * $fragments = [
+     *     ['select' => ['id', 'name']],
+     *     ['where' => ['status' => 'active']],
+     * ];
      * if ($filterToPerson) {
-     *     $fragments[] = $this->fragPersonEventFilter($mannschaftId);
+     *     $fragments[] = ['where' => ['id' => $userId]];
      * }
-     * $db->selectCompose($from, $fragments, $this->sortByListing());
+     * $db->selectCompose('users', $fragments, 'ORDER BY id');
      * ```
      *
-     * Raw WHERE + named bindings (complex OR / subquery):
+     * Raw WHERE + named bindings:
      * ```
-     * $db->selectCompose($from, [
-     *     $this->fragCoreListing(),
+     * $db->selectCompose('users', [
+     *     ['select' => ['id', 'name']],
      *     [
-     *         'where' => ['(event.event_id IN (SELECT … WHERE id = :mannschaft_id) OR …)'],
-     *         'bindings' => [':mannschaft_id' => $mannschaftId],
-     *     ],
-     * ], 'ORDER BY event.date_start');
-     * ```
-     *
-     * Bindings for placeholders that live in SELECT (no WHERE on that fragment):
-     * ```
-     * $db->selectCompose($from, [
-     *     $this->fragCoreListing(),
-     *     [
-     *         'select' => ['(SELECT … WHERE ATD.what_id = :subwhat) AS senden'],
-     *         'bindings' => [':subwhat' => $subwhat],
+     *         'where' => ['(status = :status OR email_verified = :verified)'],
+     *         'bindings' => [':status' => 'active', ':verified' => 1],
      *     ],
      * ]);
      * ```
      *
-     * Alternate FROM (event-first) with IN list:
+     * Bindings for placeholders that live in SELECT (no WHERE on that fragment):
+     * ```
+     * $db->selectCompose('users', [
+     *     [
+     *         'select' => ['id', 'name', '(SELECT :subwhat) AS senden'],
+     *         'bindings' => [':subwhat' => $flag],
+     *     ],
+     *     ['where' => ['id' => $userId]],
+     * ]);
+     * ```
+     *
+     * Alternate FROM with JOIN + IN list:
      * ```
      * $db->selectCompose(
-     *     'event LEFT JOIN uebungs_programm ON uebungs_programm.event_id = event.event_id',
+     *     'users LEFT JOIN profiles ON profiles.user_id = users.id',
      *     [
-     *         $this->fragCoreListing(),
-     *         ['where' => ['event.event_art_id IN (:ids)'], 'bindings' => [':ids' => $eventArtIds]],
+     *         ['select' => ['users.id', 'users.name', 'profiles.bio']],
+     *         ['where' => ['users.id IN (:ids)'], 'bindings' => [':ids' => $userIds]],
      *     ],
-     *     'ORDER BY event.date_start'
+     *     'ORDER BY users.id'
      * );
      * ```
      *
@@ -772,11 +829,11 @@ trait CommonModelPicoPdoTrait
      * ```
      * Batch delete (list of WHERE maps / conditions — one OR-group per entry):
      * ```
-     * $db->delete('kurs_teilnehmer', [
-     *     ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 3, 'mannschaft_id' => 4],
-     *     ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 5, 'mannschaft_id' => 6],
+     * $db->delete('users', [
+     *     ['id' => 1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
+     *     ['id' => 2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
      * ]);
-     * // DELETE FROM kurs_teilnehmer WHERE (kurspool_id = … AND …) OR (kurspool_id = … AND …)
+     * // DELETE FROM users WHERE (id = … AND status = … AND …) OR (id = … AND …)
      * ```
      * Batch with per-row bindings + sqlTail:
      * ```
@@ -796,6 +853,21 @@ trait CommonModelPicoPdoTrait
     protected function delete(string $table, string|array $where, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
         if (is_array($where) && $where !== [] && array_is_list($where) && $where === array_filter($where, is_array(...))) {
+            $whereChunks = $this->chunkForPacket($where);
+
+            if (count($whereChunks) > 1) {
+                $rowCount = 0;
+                $this->withAtomicChunks(count($whereChunks), function () use ($whereChunks, &$rowCount, $table, $bindings, $sqlTail): void {
+                    $offset = 0;
+                    foreach ($whereChunks as $chunk) {
+                        $rowCount += $this->delete($table, $chunk, $this->chunkList($bindings, $offset, count($chunk)), $sqlTail);
+                        $offset += count($chunk);
+                    }
+                });
+
+                return $rowCount;
+            }
+
             [$whereClause, $params] = $this->buildDeleteSqlParts($where, $bindings);
         } else {
             [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
@@ -1228,5 +1300,112 @@ trait CommonModelPicoPdoTrait
             implode(' OR ', array_map(static fn(string $w): string => "({$w})", $wheres)),
             $params,
         ];
+    }
+
+
+
+
+
+    /**
+     * Keep a split batch all-or-nothing.
+     *
+     * One statement is atomic by itself; several are not, so when chunking actually splits the
+     * work this opens a transaction — unless the caller already runs one, whose commit then
+     * governs.
+     *
+     * @template T
+     * @param callable():T $work
+     * @return T
+     */
+    private function withAtomicChunks(int $chunkCount, callable $work): mixed
+    {
+        $ownTransaction = $chunkCount > 1 && !$this->pdo()->inTransaction();
+        if ($ownTransaction) {
+            $this->pdo()->beginTransaction();
+        }
+
+        try {
+            $result = $work();
+            if ($ownTransaction) {
+                $this->pdo()->commit();
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            // Must use leading `\`: this file is namespaced, so bare `Throwable` is not global.
+            $this->rollBackChunkTransactionIfOwned($ownTransaction);
+            throw $e;
+        }
+    }
+
+    /**
+     * Rolls back a transaction opened by {@see withAtomicChunks()} for a multi-chunk batch.
+     * No-op when the caller already owned the transaction (or the batch was a single chunk).
+     */
+    private function rollBackChunkTransactionIfOwned(bool $owned): void
+    {
+        if (!$owned) {
+            return;
+        }
+        $this->pdo()->rollBack();
+    }
+
+
+    /**
+     * Splits rows into chunks whose statement fits the packet, halving while a chunk is too big.
+     *
+     * A single row is never split — it is the smallest unit a statement can carry, so an
+     * oversized row is returned as its own chunk and left to fail loudly rather than be
+     * silently truncated.
+     *
+     * @template TRow
+     * @param list<TRow> $rows
+     * @return list<list<TRow>> Never empty; a batch that already fits is returned unchanged.
+     */
+    private function chunkForPacket(array $rows): array
+    {
+        // A single row cannot be split further, so skip sizing it — this is the hot path for
+        // every non-batch write.
+        if (count($rows) < 2) {
+            return [$rows];
+        }
+
+        // serialize() over json_encode(): it never fails on binary column values, and its
+        // per-value overhead (`i:2;`, `s:5:"..."`) tracks the SQL scaffolding far more closely.
+        $size = strlen(serialize($rows));
+
+        if ($size < self::MAX_ALLOWED_PACKET * self::PACKET_FILL_RATIO) {
+            return [$rows];
+        }
+
+        $half = (int)ceil(count($rows) / 2);
+
+        return array_merge(
+            $this->chunkForPacket(array_slice($rows, 0, $half)),
+            $this->chunkForPacket(array_slice($rows, $half)),
+        );
+    }
+
+
+    /**
+     * Slices one chunk out of a parallel list.
+     *
+     * A batched write carries several inputs that run parallel per row — the SET maps, the WHERE
+     * rows and a per-row bindings list — so a chunk has to take the same slice of each.
+     * {@see buildUpdateSqlParts()} and {@see buildDeleteSqlParts()} read them positionally
+     * (`$bindings[$i]`), and chunks are uneven because {@see chunkForPacket()} halves, so the
+     * slice has to be taken by explicit offset and length rather than a fixed stride.
+     *
+     * A value that is not a list is shared by every row — a single bindings map, or a WHERE that
+     * applies throughout — and is passed through untouched.
+     *
+     * @param int|string|array<mixed>|null $value
+     * @return int|string|array<mixed>|null
+     */
+    private function chunkList(int|string|array|null $value, int $offset, int $length): int|string|array|null
+    {
+        return is_array($value) && array_is_list($value)
+            ? array_slice($value, $offset, $length)
+            : $value;
     }
 }

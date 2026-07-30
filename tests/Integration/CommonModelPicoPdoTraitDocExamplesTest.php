@@ -743,7 +743,7 @@ class CommonModelPicoPdoTraitDocExamplesTest extends TestCase
 
     public function testDocDeleteBatchCompositeKeys(): void
     {
-        // Mirrors the kurs_teilnehmer-style batch delete example (list of WHERE maps → OR groups).
+        // Mirrors the batch delete example (list of WHERE maps → OR groups).
         $id1 = $this->seedUser('BatchDel1', 'batch-del-1@example.com', [
             'status' => 'inactive',
             'email_verified' => 0,
@@ -897,11 +897,89 @@ class CommonModelPicoPdoTraitDocExamplesTest extends TestCase
         $this->assertSame(1, $rows);
     }
 
+    public function testDocReadmeBatchInsertSameColumns(): void
+    {
+        // Mirrors README Common Operations / Step 8 same-column batch insert (Ion / Ani).
+        $result = $this->db->insert(self::TABLE_USERS, [
+            ['name' => 'Ion', 'email' => 'ion@example.com', 'created_at = NOW()', 'is_active' => 1],
+            ['name' => 'Ani', 'email' => 'ani@example.com', 'created_at = NOW()', 'is_active' => 0],
+        ]);
+
+        $this->assertSame(2, $result['rows']);
+        $this->assertSame('inserted', $result['status']);
+        $this->assertSame(1, (int)$this->pdo->query(
+            'SELECT is_active FROM ' . self::TABLE_USERS . " WHERE email = 'ion@example.com'"
+        )->fetchColumn());
+        $this->assertSame(0, (int)$this->pdo->query(
+            'SELECT is_active FROM ' . self::TABLE_USERS . " WHERE email = 'ani@example.com'"
+        )->fetchColumn());
+    }
+
+    public function testDocReadmeBatchInsertMixedShapes(): void
+    {
+        $result = $this->db->insert(self::TABLE_USERS, [
+            ['name' => 'Ion', 'email' => 'ion-mixed@example.com'],
+            ['name' => 'Ani', 'email' => 'ani-mixed@example.com', 'role' => 'admin'],
+        ]);
+
+        $this->assertSame(2, $result['rows']);
+        $this->assertSame('admin', $this->pdo->query(
+            'SELECT role FROM ' . self::TABLE_USERS . " WHERE email = 'ani-mixed@example.com'"
+        )->fetchColumn());
+        $this->assertNull($this->pdo->query(
+            'SELECT role FROM ' . self::TABLE_USERS . " WHERE email = 'ion-mixed@example.com'"
+        )->fetchColumn());
+    }
+
+    public function testDocReadmeBatchInsertFromPayloadLoop(): void
+    {
+        // Mirrors README list → rows[] → insert pattern.
+        $incoming = [
+            ['name' => 'Loop A', 'email' => 'loop-a-ins@example.com', 'status' => 'pending'],
+            ['name' => 'Loop B', 'email' => 'loop-b-ins@example.com', 'status' => 'pending'],
+        ];
+        $rows = [];
+        foreach ($incoming as $user) {
+            $rows[] = [
+                'name' => $user['name'],
+                'email' => $user['email'],
+                'status' => $user['status'],
+            ];
+        }
+
+        $result = $this->db->insert(self::TABLE_USERS, $rows);
+        $this->assertSame(2, $result['rows']);
+        $this->assertTrue($this->db->exists(self::TABLE_USERS, 'email', 'loop-b-ins@example.com'));
+    }
+
+    public function testDocReadmeBatchUpdateByIds(): void
+    {
+        $id1 = $this->seedUser('Loop A', 'loop-a@example.com');
+        $id2 = $this->seedUser('Loop B', 'loop-b@example.com');
+
+        $data = [
+            ['name' => 'New A', 'status' => 'pending'],
+            ['name' => 'New B', 'status' => 'pending'],
+        ];
+        $where = [
+            ['id' => $id1],
+            ['id' => $id2],
+        ];
+
+        $this->assertSame(2, $this->db->update(self::TABLE_USERS, $data, $where));
+        $this->assertSame('New A', $this->pdo->query(
+            'SELECT name FROM ' . self::TABLE_USERS . ' WHERE id = ' . $id1
+        )->fetchColumn());
+        $this->assertSame('pending', $this->pdo->query(
+            'SELECT status FROM ' . self::TABLE_USERS . ' WHERE id = ' . $id2
+        )->fetchColumn());
+    }
+
     public function testDocReadmeUpdateBatchLoopPattern(): void
     {
         $rows = [
-            ['id' => $this->seedUser('Loop A', 'loop-a@example.com'), 'name' => 'New A', 'status' => 'pending'],
-            ['id' => $this->seedUser('Loop B', 'loop-b@example.com'), 'name' => 'New B', 'status' => 'pending'],
+            ['id' => $this->seedUser('Loop A', 'loop-a-upd@example.com'), 'name' => 'New A', 'status' => 'pending'],
+            ['id' => $this->seedUser('Loop B', 'loop-b-upd@example.com'), 'name' => 'New B', 'status' => 'pending'],
         ];
         $data = [];
         $where = [];
@@ -925,6 +1003,35 @@ class CommonModelPicoPdoTraitDocExamplesTest extends TestCase
             'status' => 'inactive',
             'email_verified' => 0,
         ]));
+    }
+
+    public function testDocReadmeBatchDeleteCompositeKeys(): void
+    {
+        // Mirrors README multi-column AND-groups OR'd together (same shape as PHPDoc batch delete).
+        $id1 = $this->seedUser('BatchDel1', 'batch-del-1@example.com', [
+            'status' => 'inactive',
+            'email_verified' => 0,
+            'role' => 'a',
+        ]);
+        $id2 = $this->seedUser('BatchDel2', 'batch-del-2@example.com', [
+            'status' => 'inactive',
+            'email_verified' => 0,
+            'role' => 'b',
+        ]);
+        $keepId = $this->seedUser('BatchKeep', 'batch-del-keep@example.com', [
+            'status' => 'inactive',
+            'email_verified' => 0,
+            'role' => 'c',
+        ]);
+
+        $rows = $this->db->delete(self::TABLE_USERS, [
+            ['id' => $id1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
+            ['id' => $id2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
+        ]);
+
+        $this->assertSame(2, $rows);
+        $this->assertTrue($this->db->exists(self::TABLE_USERS, 'id', $keepId));
+        $this->assertFalse($this->db->exists(self::TABLE_USERS, 'id', $id1));
     }
 
     public function testDocReadmeExistsOperations(): void
