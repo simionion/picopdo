@@ -128,6 +128,36 @@ trait CommonModelPicoPdoTrait
     protected PDO $pdo;
 
     /**
+     * The connection every trait method runs on.
+     *
+     * Prefers `$this->pdo`. Falls back to a legacy `$this->db` handle holding the same
+     * connection, so a model can adopt the trait without renaming its property — several
+     * classes were assigning both, or resolving it by hand, to work around that.
+     *
+     * `protected`, not private, so a class whose handle lives elsewhere (a lazy connection,
+     * a wrapper, a per-organisation link) can override it:
+     *
+     * ```php
+     * protected function pdo(): PDO
+     * {
+     *     return $this->connection->handle();
+     * }
+     * ```
+     *
+     * isset() on an uninitialised typed property is false rather than fatal, so the checks
+     * below are safe on a class that sets neither — that case still reaches the usual
+     * "must not be accessed before initialization" error, naming the real problem.
+     */
+    protected function pdo(): PDO
+    {
+        if (isset($this->db) && $this->db instanceof PDO) {
+            return $this->db;
+        }
+
+        return $this->pdo;
+    }
+
+    /**
      * Combines `prepare` & `execute` in a single function and returns the PDO statement.
      *
      *  - When a parameter contains an **array**, it is expanded into multiple placeholders (for `WHERE IN`).
@@ -161,7 +191,7 @@ trait CommonModelPicoPdoTrait
         }
 
         try {
-            $stmt = $this->pdo->prepare($sql);
+            $stmt = $this->pdo()->prepare($sql);
 
             foreach ($params as $key => $value) {
                 $paramId = is_int($key) ? $key + 1 : ':' . ltrim($key, ':');
@@ -322,7 +352,7 @@ trait CommonModelPicoPdoTrait
         }
 
         $isSuccess = $rowCount > 0;
-        $lastInsertId = $this->pdo->lastInsertId() ?: 0;
+        $lastInsertId = $this->pdo()->lastInsertId() ?: 0;
         $rawId = $isSuccess ? $lastInsertId : 0;
         $id = is_numeric($rawId) ? (int)$rawId : $rawId;
         if ($config['meta'] || $isMultipleInsert) {
