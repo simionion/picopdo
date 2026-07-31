@@ -648,11 +648,11 @@ The `?` character is **always** treated as a placeholder and will be converted t
 ```php
 // ❌ The ? in LIKE pattern will be converted to a placeholder
 $users = $model->selectAll('users', null, ["name LIKE '%Marc?'"]);
-// The ? becomes :where_raw_0 without a binding — the query returns no rows
+// Throws InvalidArgumentException — not enough positional bindings for the converted ?
 
 // ❌ Also problematic in string WHERE clauses
 $users = $model->selectAll('users', null, "name LIKE '%Marc?' AND status = ?", ['active']);
-// Both ? characters are converted, but only one binding is provided — PDO error or no match
+// Both ? characters are converted, but only one binding is provided — PDO / binding error
 ```
 
 **Solutions:**
@@ -676,23 +676,28 @@ $users = $model->selectAll('users', null, ["name LIKE ?", "status = ?"],
 - **Overlapping row conditions** — each column uses `CASE WHEN …`; if one DB row matches more than one batch entry's WHERE, only the **first** matching branch applies. Prefer unique keys per row (e.g. `id`).
 - **Per-row `$bindings`** — parallel lists must align with `$data` / `$where` by index; use `null` when a row needs no external bindings (not `[null]`).
 - **Same `:name`, different values per row** — in one batch statement, a named placeholder has **one** binding; reuse the name only when the value is shared across rows.
-- **Large batches** — INSERT / UPDATE / DELETE lists that would exceed `max_allowed_packet` (16 MiB) are split automatically; a single row that alone exceeds the budget still fails at the server. Planner cost on very wide `CASE` statements can remain a concern even when the packet fits.
+- **Large batches** — INSERT / UPDATE / DELETE lists that would exceed `max_allowed_packet` (16 MiB) are split automatically; a single row that alone exceeds the budget still fails at the server. Batch UPDATE of ≥200 equal-shaped rows stages through a temporary table + JOIN instead of a wide `CASE WHEN` (faster and smaller statements); shapes the JOIN cannot express still use CASE/WHEN.
 
 ## Testing
 
 Each documented code example in the trait PHPDoc and this README has a matching test in
 `tests/Integration/CommonModelPicoPdoTraitDocExamplesTest.php` (integration) and, for SQL helpers,
 `tests/Unit/CommonModelPicoPdoTraitTest.php` (unit). Packet chunking lives in
-`tests/Unit/CommonModelPicoPdoTraitBatchChunkingTest.php`. Test names for doc examples are prefixed with `testDoc`.
+`tests/Unit/CommonModelPicoPdoTraitBatchChunkingTest.php`. Batch UPDATE scale / timing
+(200 / 2 000 / 20 000 rows, plus ~5 000 random-payload cases) lives in
+`tests/Unit/CommonModelPicoPdoTraitBatchUpdateScaleTest.php` (`@group slow`).
+Test names for doc examples are prefixed with `testDoc`.
 
 Current test coverage (`make test` prints a text summary; `make test-coverage` generates HTML):
-- **244 tests** (106 unit, 138 integration)
-- **615 assertions**
-- **100%** lines and methods on `CommonModelPicoPdoTrait` (Xdebug)
+- **266 tests** (128 unit, 138 integration)
+- **100%** lines and methods on `CommonModelPicoPdoTrait` and `CommonModelPicoPdoUtils` (Xdebug)
+- Default suite without `@group slow`: **260 tests**; the slow group adds fixed-size timing gates plus ~5 000-row random UPDATE cases
 
 ```bash
-make test              # Run all tests
+make test              # Run all tests (~40s includes @group slow batch UPDATE scale)
 make test-coverage     # Generate HTML coverage report
+# Skip the multi-second scale suite when iterating:
+#   docker-compose exec app vendor/bin/phpunit --exclude-group slow
 ```
 
 ## License

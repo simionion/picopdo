@@ -1083,9 +1083,9 @@ class CommonModelPicoPdoTraitDocExamplesTest extends TestCase
     public function testDocReadmeLiteralQuestionMarkInSqlStringIsProblematic(): void
     {
         $this->seedUser('Marc?', 'marc-problem@example.com');
-        // The `?` in the SQL string is treated as a placeholder — binding mismatch yields no match.
-        $users = $this->db->selectAll(self::TABLE_USERS, null, ["name LIKE '%Marc?'"]);
-        $this->assertCount(0, $users);
+        // The `?` in the SQL string is treated as a placeholder with no binding → hard error.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->db->selectAll(self::TABLE_USERS, null, ["name LIKE '%Marc?'"]);
     }
 
     public function testDocReadmeLiteralQuestionMarkInStringWhereIsProblematic(): void

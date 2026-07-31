@@ -3,9 +3,12 @@ declare(strict_types=1);
 
 namespace Lodur\PicoPdo;
 
+use InvalidArgumentException;
 use PDO;
 use PDOException;
 use PDOStatement;
+use RuntimeException;
+use Throwable;
 
 
 /**
@@ -18,7 +21,7 @@ use PDOStatement;
  *
  * ## Usage:
  * - Intended to be included in models that require direct database interaction.
- * - Requires a `$pdo` property of type PDO to be defined in the consuming class.
+ * - Requires a `$db` property of type PDO to be defined in the consuming class. Legacy models using `$pdo` remain supported through {@see pdo()}.
  * - Provides protected helper methods for common database tasks.
  *
  * ## Features:
@@ -72,7 +75,7 @@ use PDOStatement;
  * Rows with different column sets are grouped and inserted in separate statements.
  *
  * ### `$where` (`WhereInput` — `string|array|null`)
- * Row filter. Omitted or empty on UPDATE/DELETE yields an invalid `WHERE` clause (PDO error — guards full-table writes).
+ * Row filter. Omitted or empty on UPDATE/DELETE throws `InvalidArgumentException`, guarding full-table writes.
  *
  * **Shorthand** — column name + scalar `$bindings`:
  * ```
@@ -107,7 +110,7 @@ use PDOStatement;
  *
  * ### `$sqlTail` (`string|null`)
  * Raw SQL suffix appended to the generated statement (e.g. `'ORDER BY id'`, `'ORDER BY id LIMIT 10'`).
- * On batch UPDATE, a trailing `LIMIT` caps total rows changed across all entries.
+ * On batch UPDATE, a trailing `LIMIT` caps one generated statement; packet-split batches reject `LIMIT`.
  *
  * ### `$options` (INSERT only)
  * `['mode' => 'INSERT'|'REPLACE'|'INSERT IGNORE', 'meta' => bool, 'onDuplicateKeyUpdate' => DataMap]`
@@ -125,39 +128,14 @@ use PDOStatement;
  */
 trait CommonModelPicoPdoTrait
 {
-    /**
-     * Largest statement the server will accept, in bytes (`max_allowed_packet`).
-     *
-     * Overshooting is not recoverable: the server answers 1153 and drops the connection
-     * (`2006 server has gone away`), so an oversized batch cannot be split and retried
-     * afterwards — it has to be split before it is sent.
-     */
-    private const int MAX_ALLOWED_PACKET = 16777216;
-
-    /**
-     * Share of {@see MAX_ALLOWED_PACKET} a batch may fill, measured with `serialize()`.
-     *
-     * `serialize()` only approximates the statement, so the ratio has to absorb the error. The
-     * binding case is a batch UPDATE: its CASE/WHEN scaffolding costs ~24 bytes per row *per
-     * column* (`WHEN (a = 5) THEN 2`), so the statement runs larger the narrower the columns
-     * are. Measured across 1–30 columns the statement peaks at 1.37x its serialized size and
-     * then flattens, which caps the safe fill at 0.73; a multi-row INSERT runs *under* its
-     * serialized size (0.57x), so it is never the constraint.
-     *
-     * 0.5 keeps the worst measured shape near 69% of the packet, leaving room for shapes not
-     * measured. Nothing ordinary is affected: real batches are KB-scale, so the guard only ever
-     * fires on payloads that would otherwise have dropped the connection.
-     */
-    private const float PACKET_FILL_RATIO = 0.5;
-
     protected PDO $pdo;
 
     /**
      * The connection every trait method runs on.
      *
-     * Prefers `$this->pdo`. Falls back to a legacy `$this->db` handle holding the same
-     * connection, so a model can adopt the trait without renaming its property — several
-     * classes were assigning both, or resolving it by hand, to work around that.
+     * Prefers `$this->db`, which is the handle used throughout the codebase. Falls back to
+     * a legacy `$this->pdo` property so older models can adopt the upgraded trait without
+     * assigning both properties or resolving the connection by hand.
      *
      * `protected`, not private, so a class whose handle lives elsewhere (a lazy connection,
      * a wrapper, a per-organisation link) can override it:
@@ -169,17 +147,20 @@ trait CommonModelPicoPdoTrait
      * }
      * ```
      *
-     * isset() on an uninitialised typed property is false rather than fatal, so the checks
-     * below are safe on a class that sets neither — that case still reaches the usual
-     * "must not be accessed before initialization" error, naming the real problem.
+     * isset() on an uninitialised typed property is false rather than fatal, so the checks below
+     * are safe on a class that sets neither — that case raises a RuntimeException naming the
+     * missing connection, rather than PHP's less obvious "must not be accessed before
+     * initialization".
      */
     protected function pdo(): PDO
     {
-        if (isset($this->db) && $this->db instanceof PDO) {
-            return $this->db;
+        foreach(['pdo', 'db', 'oDB'] as $property) {
+            if (isset($this->{$property}) && $this->{$property} instanceof PDO) {
+                return $this->{$property};
+            }
         }
 
-        return $this->pdo;
+        throw new RuntimeException('No valid PDO connection found');
     }
 
     /**
@@ -301,7 +282,13 @@ trait CommonModelPicoPdoTrait
      */
     protected function exists(string $table, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): bool
     {
-        return (bool)$this->select($table, '1 as `true`', $where, $bindings, trim("{$sqlTail} LIMIT 1"))->fetchColumn();
+        return (bool)$this->select(
+            $table,
+            '1 AS `true`',
+            $where,
+            $bindings,
+            CommonModelPicoPdoUtils::appendLimitOne($sqlTail)
+        )->fetchColumn();
     }
 
 
@@ -331,6 +318,7 @@ trait CommonModelPicoPdoTrait
      * ```
      * $db->insert('users', ['name' => 'John', 'email' => 'john@example.com'], ['meta' => true]);
      * // Returns ['id' => 123, 'rows' => 1, 'status' => 'inserted']
+     * // Multi-row upserts use status 'affected' because PDO rowCount cannot distinguish mixed inserts/updates.
      * ```
      *  Multiple rows:
      * ```
@@ -347,14 +335,14 @@ trait CommonModelPicoPdoTrait
      * @param DataMap|list<DataMap> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @param array<string, mixed>|null $options Additional options for the insert operation
      * (e.g., ['mode' => 'REPLACE'] or ['mode' => 'INSERT IGNORE'] or ['onDuplicateKeyUpdate' => ['column' => 'value']])
-     * @return int|string|array<string, mixed> The ID of the inserted record, 0 if failed. If 'meta' is set to true, returns an array with meta info like ['id', 'rows', 'status' => 'noop|inserted|updated']
+     * @return int|string|array<string, mixed> The ID of the inserted record, 0 if failed. For multi-statement batches, `id` is from the final INSERT statement. If 'meta' is true, returns ['id', 'rows', 'status' => 'noop|inserted|updated|affected']
      * @throws PDOException
      */
     protected function insert(string $table, array $data, array|null $options = null): int|string|array
     {
         $config = array_merge([
             'mode'                 => 'INSERT',
-            'meta'                 => false, // By default returns the ID else 0. Set `true` to return ['id' => $id, 'rows' => $affectedRows, 'status' => 'noop|inserted|updated']
+            'meta'                 => false, // By default returns the ID else 0. Set `true` to return ['id' => $id, 'rows' => $affectedRows, 'status' => 'noop|inserted|updated|affected']
             'onDuplicateKeyUpdate' => []
         ], (array)$options);
 
@@ -364,14 +352,24 @@ trait CommonModelPicoPdoTrait
             default         => 'INSERT'
         };
 
+        if ($data === []) {
+            return $config['meta'] ? ['id' => 0, 'rows' => 0, 'status' => 'noop'] : 0;
+        }
+
         $onDuplicateKeyUpdate = (array)$config['onDuplicateKeyUpdate'];
-        $isMultipleInsert = array_is_list($data) && is_array($data[0] ?? null);
-        $chunks = $this->chunkForPacket($isMultipleInsert ? $data : [$data]);
+        $isMultipleInsert = CommonModelPicoPdoUtils::isRowSet($data);
+        $rows = $isMultipleInsert ? array_values($data) : [$data];
+
+        // The duplicate-update payload is repeated in every generated INSERT statement, so its
+        // serialized size is fixed overhead that must be counted for every packet-sized chunk.
+        $fixedBytes = $onDuplicateKeyUpdate === [] ? 0 : strlen(serialize($onDuplicateKeyUpdate));
+        $chunks = CommonModelPicoPdoUtils::chunkForPacket($rows, $fixedBytes);
+        $statementCount = count($chunks) > 1 || CommonModelPicoPdoUtils::hasMultipleInsertShapes($rows) ? 2 : 1;
         $rowCount = 0;
 
-        $this->withAtomicChunks(count($chunks), function () use ($chunks, $insertMode, $table, $onDuplicateKeyUpdate, &$rowCount): void {
+        $this->withAtomicStatements($statementCount, function () use ($chunks, $insertMode, $table, $onDuplicateKeyUpdate, &$rowCount): void {
             foreach ($chunks as $chunk) {
-                foreach ($this->buildInsertBatches($chunk) as [$columns, $valueRows, $params]) {
+                foreach (CommonModelPicoPdoUtils::buildInsertBatches($chunk) as [$columns, $valueRows, $params]) {
                     $sql = "{$insertMode} INTO {$table} ({$columns}) VALUES " . implode(', ', $valueRows);
                     if ($insertMode === 'INSERT' && $onDuplicateKeyUpdate !== []) {
                         [$updateClause, $params] = $this->buildSqlClause($onDuplicateKeyUpdate, 'upd_', ', ', $params);
@@ -383,18 +381,22 @@ trait CommonModelPicoPdoTrait
         });
 
         $isSuccess = $rowCount > 0;
+        // For a multi-statement batch this is the ID reported by the final INSERT statement,
+        // not an ID range for the complete batch.
         $lastInsertId = $this->pdo()->lastInsertId() ?: 0;
         $rawId = $isSuccess ? $lastInsertId : 0;
         $id = is_numeric($rawId) ? (int)$rawId : $rawId;
+
         if ($config['meta'] || $isMultipleInsert) {
             $isUpsert = $insertMode === 'INSERT' && $onDuplicateKeyUpdate !== [];
             return [
                 'id'     => $id,
                 'rows'   => $rowCount,
                 'status' => match (true) {
-                    $rowCount === 0            => 'noop',
-                    $isUpsert && $rowCount > 1 => 'updated',
-                    default                    => 'inserted',
+                    $rowCount === 0                => 'noop',
+                    $isUpsert && $isMultipleInsert => 'affected',
+                    $isUpsert && $rowCount > 1     => 'updated',
+                    default                        => 'inserted',
                 },
             ];
         }
@@ -415,7 +417,6 @@ trait CommonModelPicoPdoTrait
     }
 
 
-
     /**
      * This is a wrapper around {@see insert()} that performs an `INSERT IGNORE`.
      * ```
@@ -432,7 +433,6 @@ trait CommonModelPicoPdoTrait
     {
         return $this->insert($table, $data, ['mode' => 'INSERT IGNORE', 'meta' => true]);
     }
-
 
 
     /**
@@ -460,7 +460,8 @@ trait CommonModelPicoPdoTrait
      *
      * Single updates build classic `SET col = :set_col WHERE …` SQL. Batch updates (parallel `$data` / `$where`
      * lists) compile to one `CASE WHEN` query per column. `$sqlTail` is appended to the whole statement
-     * (e.g. `ORDER BY id LIMIT 10`); in batch mode a `LIMIT` caps the total rows changed across all entries.
+     * (e.g. `ORDER BY id LIMIT 10`). A packet-split batch rejects `LIMIT`, because applying the
+     * same limit independently to every chunk would exceed the caller's requested total.
      *
      * ### Usage examples:
      * Classic key-value:
@@ -533,22 +534,63 @@ trait CommonModelPicoPdoTrait
      */
     protected function update(string $table, array $data, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
-        if ($this->isBatchUpdatePayload($data, $where)) {
-            // Batch: one CASE/WHEN query per chunk. Each row costs its SET values *and* its own
-            // WHERE, so size the two together, then take the same slice of every parallel input.
-            $chunks = $this->chunkForPacket(array_map(null, $data, $where));
+        if ($data === []) {
+            throw new InvalidArgumentException('UPDATE data cannot be empty');
+        }
+
+        if (CommonModelPicoPdoUtils::isRowSet($data)) {
+            $data = array_values($data);
+
+            if (!is_array($where)
+                || !CommonModelPicoPdoUtils::hasOnlyIntKeys($where)
+                || count($data) !== count($where)) {
+                throw new InvalidArgumentException(
+                    'Batch UPDATE requires one integer-keyed WHERE condition per data row'
+                );
+            }
+
+            $where = array_values($where);
+            foreach ($data as $row) {
+                if ($row === []) {
+                    throw new InvalidArgumentException('Batch UPDATE rows cannot be empty');
+                }
+            }
+            foreach ($where as $condition) {
+                if ($condition === [] || (is_string($condition) && trim($condition) === '')) {
+                    throw new InvalidArgumentException('Batch UPDATE conditions cannot be empty');
+                }
+            }
+
+            $bindings = CommonModelPicoPdoUtils::normalizePositionalBindings($bindings);
+            $perRowBindings = is_array($bindings) && $bindings !== [] && array_is_list($bindings);
+            $packetRows = [];
+            foreach ($data as $i => $row) {
+                $packetRows[] = [
+                    $row,
+                    $where[$i],
+                    $perRowBindings ? ($bindings[$i] ?? null) : null,
+                ];
+            }
+            $fixedBytes = $perRowBindings ? 0 : strlen(serialize($bindings));
+            $chunks = CommonModelPicoPdoUtils::chunkForPacket($packetRows, $fixedBytes);
+
+            if (count($chunks) > 1 && CommonModelPicoPdoUtils::hasLimit($sqlTail)) {
+                throw new InvalidArgumentException(
+                    'LIMIT cannot be combined with a packet-split batch UPDATE'
+                );
+            }
 
             if (count($chunks) > 1) {
                 $rowCount = 0;
-                $this->withAtomicChunks(count($chunks), function () use ($chunks, &$rowCount, $table, $data, $where, $bindings, $sqlTail): void {
+                $this->withAtomicStatements(count($chunks), function () use ($chunks, &$rowCount, $table, $data, $where, $bindings, $sqlTail): void {
                     $offset = 0;
                     foreach ($chunks as $chunk) {
                         $length = count($chunk);
                         $rowCount += $this->update(
                             $table,
-                            $this->chunkList($data, $offset, $length),
-                            $this->chunkList($where, $offset, $length),
-                            $this->chunkList($bindings, $offset, $length),
+                            CommonModelPicoPdoUtils::chunkList($data, $offset, $length),
+                            CommonModelPicoPdoUtils::chunkList($where, $offset, $length),
+                            CommonModelPicoPdoUtils::chunkList($bindings, $offset, $length),
                             $sqlTail
                         );
                         $offset += $length;
@@ -556,6 +598,10 @@ trait CommonModelPicoPdoTrait
                 });
 
                 return $rowCount;
+            }
+
+            if (CommonModelPicoPdoUtils::canUpdateViaTempTable($table, $data, $where, $bindings, $sqlTail)) {
+                return $this->tempTableUpdate($table, $data, $where);
             }
 
             [$setClause, $whereClause, $params] = $this->buildUpdateSqlParts($data, $where, $bindings);
@@ -566,8 +612,8 @@ trait CommonModelPicoPdoTrait
             $params = array_merge($params, $whereParams);
         }
 
-        $whereClause = str_contains($whereClause, 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
-        $sql = implode(' ', array_filter(array_map(trim(...), ['UPDATE', $table, 'SET', $setClause, $whereClause, (string)$sqlTail,])));
+        $whereClause = CommonModelPicoPdoUtils::requireWhereClause($whereClause, 'UPDATE');
+        $sql = implode(' ', array_filter(array_map(trim(...), ['UPDATE', $table, 'SET', $setClause, $whereClause, (string)$sqlTail])));
         return $this->prepExec($sql, $params)->rowCount();
     }
 
@@ -623,9 +669,12 @@ trait CommonModelPicoPdoTrait
      */
     protected function select(string $table, array|string|int|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): PDOStatement
     {
-        $columnList = implode(', ', is_array($columns) ? $columns : [$columns ?: '*']);
+        $columnList = implode(', ', is_array($columns) ? ($columns ?: ['*']) : [$columns ?: '*']);
         [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
-        $whereClause = empty($where) || str_starts_with(ltrim($whereClause), 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
+        $whereClause = trim($whereClause);
+        if ($whereClause !== '' && preg_match('/^WHERE\b/i', $whereClause) !== 1) {
+            $whereClause = 'WHERE ' . $whereClause;
+        }
         $sql = implode(' ', array_filter(array_map(trim(...), ['SELECT', $columnList, 'FROM', $table, $whereClause, (string)$sqlTail])));
         return $this->prepExec($sql, $params);
     }
@@ -643,7 +692,13 @@ trait CommonModelPicoPdoTrait
      */
     protected function selectOne(string $table, array|string|int|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): array
     {
-        return $this->select($table, $columns, $where, $bindings, trim("{$sqlTail} LIMIT 1"))->fetch(PDO::FETCH_ASSOC) ?: [];
+        return $this->select(
+            $table,
+            $columns,
+            $where,
+            $bindings,
+            CommonModelPicoPdoUtils::appendLimitOne($sqlTail)
+        )->fetch(PDO::FETCH_ASSOC) ?: [];
     }
 
     /**
@@ -677,12 +732,12 @@ trait CommonModelPicoPdoTrait
      *
      * ```
      * [
-     *     'select'   => ['users.id', 'users.name', 'profiles.bio'],
-     *     'joins'    => ['LEFT JOIN profiles ON profiles.user_id = users.id'],
+     *     'select'   => ['event.event_id', 'event.date_start'],
+     *     'joins'    => ['LEFT JOIN event_to_tab ON event_to_tab.event_id = event.event_id'],
      *     'where'    => [
-     *         'users.status' => 'active',
-     *         'users.created_at >= ?' => $dateFrom,
-     *         'users.email_verified != 0',
+     *         'event.fw_id' => $fwId,
+     *         'event.date_start >= ?' => $dateFrom,
+     *         'event.status != 0',
      *     ],
      *     'bindings' => [':named' => $value],
      * ]
@@ -699,61 +754,58 @@ trait CommonModelPicoPdoTrait
      *
      * ### Usage examples
      *
-     * Core columns + filter + order:
+     * Core columns + year/org filter + order:
      * ```
      * $db->selectCompose(
-     *     'users',
+     *     'uebungs_programm LEFT JOIN event ON event.event_id = uebungs_programm.event_id',
      *     [
-     *         ['select' => ['id', 'name', 'status']],
-     *         ['where' => ['status' => 'active']],
+     *         ['select' => ['event.event_id', 'event.date_start'], 'joins' => ['LEFT JOIN arbeitsrapporte ON …']],
+     *         ['where' => ['event.fw_id' => $fwId, 'event.date_start >= ?' => $yearStart, 'event.date_start < ?' => $yearEnd]],
      *     ],
-     *     'ORDER BY id'
+     *     'ORDER BY event.date_start, event.event_id'
      * )->fetchAll(PDO::FETCH_ASSOC);
      * ```
      *
      * Optional filter fragment (omit the array entry when not needed):
      * ```
-     * $fragments = [
-     *     ['select' => ['id', 'name']],
-     *     ['where' => ['status' => 'active']],
-     * ];
+     * $fragments = [$this->fragCoreListing(), $this->fragWhereYearOrg($year, $fwId)];
      * if ($filterToPerson) {
-     *     $fragments[] = ['where' => ['id' => $userId]];
+     *     $fragments[] = $this->fragPersonEventFilter($mannschaftId);
      * }
-     * $db->selectCompose('users', $fragments, 'ORDER BY id');
+     * $db->selectCompose($from, $fragments, $this->sortByListing());
      * ```
      *
-     * Raw WHERE + named bindings:
+     * Raw WHERE + named bindings (complex OR / subquery):
      * ```
-     * $db->selectCompose('users', [
-     *     ['select' => ['id', 'name']],
+     * $db->selectCompose($from, [
+     *     $this->fragCoreListing(),
      *     [
-     *         'where' => ['(status = :status OR email_verified = :verified)'],
-     *         'bindings' => [':status' => 'active', ':verified' => 1],
+     *         'where' => ['(event.event_id IN (SELECT … WHERE id = :mannschaft_id) OR …)'],
+     *         'bindings' => [':mannschaft_id' => $mannschaftId],
      *     ],
-     * ]);
+     * ], 'ORDER BY event.date_start');
      * ```
      *
      * Bindings for placeholders that live in SELECT (no WHERE on that fragment):
      * ```
-     * $db->selectCompose('users', [
+     * $db->selectCompose($from, [
+     *     $this->fragCoreListing(),
      *     [
-     *         'select' => ['id', 'name', '(SELECT :subwhat) AS senden'],
-     *         'bindings' => [':subwhat' => $flag],
+     *         'select' => ['(SELECT … WHERE ATD.what_id = :subwhat) AS senden'],
+     *         'bindings' => [':subwhat' => $subwhat],
      *     ],
-     *     ['where' => ['id' => $userId]],
      * ]);
      * ```
      *
-     * Alternate FROM with JOIN + IN list:
+     * Alternate FROM (event-first) with IN list:
      * ```
      * $db->selectCompose(
-     *     'users LEFT JOIN profiles ON profiles.user_id = users.id',
+     *     'event LEFT JOIN uebungs_programm ON uebungs_programm.event_id = event.event_id',
      *     [
-     *         ['select' => ['users.id', 'users.name', 'profiles.bio']],
-     *         ['where' => ['users.id IN (:ids)'], 'bindings' => [':ids' => $userIds]],
+     *         $this->fragCoreListing(),
+     *         ['where' => ['event.event_art_id IN (:ids)'], 'bindings' => [':ids' => $eventArtIds]],
      *     ],
-     *     'ORDER BY users.id'
+     *     'ORDER BY event.date_start'
      * );
      * ```
      *
@@ -776,14 +828,16 @@ trait CommonModelPicoPdoTrait
         $params = [];
 
         foreach ($fragments as $index => $fragment) {
-            $select = [...$select, ...(array)($fragment['select'] ?? []),];
-            $joins = [...$joins, ...(array)($fragment['joins'] ?? []),];
+            array_push($select, ...(array)($fragment['select'] ?? []));
+            array_push($joins, ...(array)($fragment['joins'] ?? []));
+
             [$whereSql, $fragmentParams] = $this->buildSqlClause(
                 (array)($fragment['where'] ?? []),
                 "frag_{$index}_",
                 ' AND ',
                 (array)($fragment['bindings'] ?? [])
             );
+
             if ($whereSql !== '') {
                 $where[] = "({$whereSql})";
             }
@@ -792,7 +846,6 @@ trait CommonModelPicoPdoTrait
 
         $select = array_values(array_unique($select));
         $joins = array_values(array_unique($joins));
-
 
         return $this->select(
             implode(PHP_EOL, [$table, ...$joins]),
@@ -829,11 +882,11 @@ trait CommonModelPicoPdoTrait
      * ```
      * Batch delete (list of WHERE maps / conditions — one OR-group per entry):
      * ```
-     * $db->delete('users', [
-     *     ['id' => 1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
-     *     ['id' => 2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
+     * $db->delete('kurs_teilnehmer', [
+     *     ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 3, 'mannschaft_id' => 4],
+     *     ['kurspool_id' => 1, 'kurs_id' => 2, 'fw_id' => 5, 'mannschaft_id' => 6],
      * ]);
-     * // DELETE FROM users WHERE (id = … AND status = … AND …) OR (id = … AND …)
+     * // DELETE FROM kurs_teilnehmer WHERE (kurspool_id = … AND …) OR (kurspool_id = … AND …)
      * ```
      * Batch with per-row bindings + sqlTail:
      * ```
@@ -852,16 +905,45 @@ trait CommonModelPicoPdoTrait
      */
     protected function delete(string $table, string|array $where, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
-        if (is_array($where) && $where !== [] && array_is_list($where) && $where === array_filter($where, is_array(...))) {
-            $whereChunks = $this->chunkForPacket($where);
+        if (CommonModelPicoPdoUtils::isRowSet($where)) {
+            $where = array_values($where);
+            foreach ($where as $condition) {
+                if ($condition === []) {
+                    throw new InvalidArgumentException('Batch DELETE conditions cannot be empty');
+                }
+            }
+
+            $bindings = CommonModelPicoPdoUtils::normalizePositionalBindings($bindings);
+            $perRowBindings = is_array($bindings) && $bindings !== [] && array_is_list($bindings);
+            $packetRows = [];
+            foreach ($where as $i => $condition) {
+                $packetRows[] = [
+                    $condition,
+                    $perRowBindings ? ($bindings[$i] ?? null) : null,
+                ];
+            }
+            $fixedBytes = $perRowBindings ? 0 : strlen(serialize($bindings));
+            $whereChunks = CommonModelPicoPdoUtils::chunkForPacket($packetRows, $fixedBytes);
+
+            if (count($whereChunks) > 1 && CommonModelPicoPdoUtils::hasLimit($sqlTail)) {
+                throw new InvalidArgumentException(
+                    'LIMIT cannot be combined with a packet-split batch DELETE'
+                );
+            }
 
             if (count($whereChunks) > 1) {
                 $rowCount = 0;
-                $this->withAtomicChunks(count($whereChunks), function () use ($whereChunks, &$rowCount, $table, $bindings, $sqlTail): void {
+                $this->withAtomicStatements(count($whereChunks), function () use ($whereChunks, &$rowCount, $table, $where, $bindings, $sqlTail): void {
                     $offset = 0;
                     foreach ($whereChunks as $chunk) {
-                        $rowCount += $this->delete($table, $chunk, $this->chunkList($bindings, $offset, count($chunk)), $sqlTail);
-                        $offset += count($chunk);
+                        $length = count($chunk);
+                        $rowCount += $this->delete(
+                            $table,
+                            CommonModelPicoPdoUtils::chunkList($where, $offset, $length),
+                            CommonModelPicoPdoUtils::chunkList($bindings, $offset, $length),
+                            $sqlTail
+                        );
+                        $offset += $length;
                     }
                 });
 
@@ -872,7 +954,8 @@ trait CommonModelPicoPdoTrait
         } else {
             [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
         }
-        $whereClause = str_contains($whereClause, 'WHERE ') ? $whereClause : 'WHERE ' . $whereClause;
+
+        $whereClause = CommonModelPicoPdoUtils::requireWhereClause($whereClause, 'DELETE');
         $sql = implode(' ', array_filter(array_map(trim(...), ['DELETE FROM', $table, $whereClause, (string)$sqlTail])));
         return $this->prepExec($sql, $params)->rowCount();
     }
@@ -883,7 +966,8 @@ trait CommonModelPicoPdoTrait
      *
      * - Replaces named placeholders (`:key`) with multiple placeholders (`:key0, :key1, :key2`) for `WHERE IN` queries.
      * - Updates the bind parameters to match the expanded placeholders.
-     * - Supports **only named placeholders** for arrays (positional `?` placeholders are not expanded).
+     * - Supports named placeholders for arrays. Positional `IN (?)` is first converted by {@see convertToNamedPlaceholders()}.
+     * - Empty arrays throw rather than generating invalid or surprising `IN ()` / `IN (NULL)` SQL.
      * **Examples:**
      * ```
      * $sql = 'SELECT * FROM users WHERE id IN (:ids)';
@@ -901,42 +985,50 @@ trait CommonModelPicoPdoTrait
      */
     protected function buildInQuery(string $sql, array $params): array
     {
-        if (empty($sql) || empty($params)) {
+        if ($sql === '' || $params === []) {
             return [$sql, $params];
         }
 
         $expandedParams = [];
 
         foreach ($params as $key => $value) {
-            if (is_array($value)) {
+            if (!is_array($value)) {
+                $expandedParams[$key] = $value;
+                continue;
+            }
 
-                if (is_numeric($key) || empty($value)) {
-                    if (defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) {
-                        error_log('Provided array for IN clause is empty or key is numeric - ' . $sql . ' - ' . json_encode([$key => $value]));
-                    }
-                    unset($params[(string)$key]);
-                    continue;
-                }
+            if (!is_string($key)) {
+                throw new InvalidArgumentException(
+                    'Array bindings require a named placeholder'
+                );
+            }
 
-                // Only support named parameters for array values
-                $searchKey = str_starts_with($key, ':') ? $key : ":{$key}";
+            if ($value === []) {
+                throw new InvalidArgumentException(
+                    "Array binding {$key} cannot be empty"
+                );
+            }
 
-                $valuesIn = array_values($value); // Ensure values are indexed
+            $searchKey = ':' . ltrim($key, ':');
+            $valuesIn = array_values($value);
+            $placeholders = array_map(
+                static fn(int $index): string => "{$searchKey}{$index}",
+                array_keys($valuesIn)
+            );
 
-                $placeholders = array_map(static fn($index) => "{$searchKey}{$index}", array_keys($valuesIn));
+            // Match :key followed by a word boundary to prevent partial matches.
+            // This ensures :ids doesn't match :ids_extra or :ids2.
+            $pattern = '/(?<!:)' . preg_quote($searchKey, '/') . '\\b/';
+            $sql = preg_replace($pattern, implode(',', $placeholders), $sql, -1, $replacementCount);
 
-                // Match :key followed by a word boundary to prevent partial matches
-                // This ensures :ids doesn't match :ids_extra or :ids2
-                $pattern = '/(?<!:)' . preg_quote($searchKey, '/') . '\b/';
+            if ($replacementCount === 0) {
+                throw new InvalidArgumentException(
+                    "Array binding {$searchKey} has no matching SQL placeholder"
+                );
+            }
 
-                $sql = preg_replace($pattern, implode(',', $placeholders), $sql);
-
-                $expandedParams = [...$expandedParams, ...array_combine($placeholders, $valuesIn)];
-
-                // Remove original array key
-                unset($params[$key]);
-            } else {
-                $expandedParams[(string)$key] = $value;
+            foreach ($placeholders as $index => $placeholder) {
+                $expandedParams[$placeholder] = $valuesIn[$index];
             }
         }
 
@@ -945,7 +1037,7 @@ trait CommonModelPicoPdoTrait
 
 
     /**
-     * Build SQL clauses and parameters from mixed data array, converting to named placeholders for key-value pairs.
+     * Build SQL clauses and parameters from mixed data array, preserving input order and converting bindings to named placeholders.
      * ```
      * buildSqlClause(['name' => 'John', 'email' => 'john@example.com', 'created_at = NOW()'], 'insert_');
      * //sql: name = :insert_name, email = :insert_email, created_at = NOW()
@@ -975,30 +1067,76 @@ trait CommonModelPicoPdoTrait
     protected function buildSqlClause(array $data, string|null $prefix = null, string|null $joiner = null, array $bindings = []): array
     {
         $joiner ??= ', ';
-        $sqlPairs = [];
-        $sqlRaws = [];
+        $clauses = [];
         $params = [];
+        $questionBindings = [];
+        $rawPositionalBindings = [];
+        $namedBindings = [];
 
-        foreach ($data as $key => $value) {
-            if (is_numeric($key)) {
-                // Raw SQL like "updated_at = NOW()" or "date > ?"
-                $sqlRaws[] = $value;
-            } elseif (str_contains($key, '?')) {
-                // Key with ? placeholder like ['last_login > ?' => $date]
-                $sqlPairs[] = $key;
-                $params[] = $value;
+        foreach ($bindings as $key => $value) {
+            if (is_int($key)) {
+                $rawPositionalBindings[] = $value;
             } else {
-                // Key-value pair like "users.name" => "John"
-                $keySafe = str_replace('.', '_dot_', $key);
-                $sqlPairs[] = "{$key} = :{$prefix}{$keySafe}";
-                $params[":{$prefix}{$keySafe}"] = $value;
+                $namedBindings[$key] = $value;
             }
         }
 
-        [$pairsSql, $pairsParams] = $this->convertToNamedPlaceholders(implode($joiner, $sqlPairs), $params, $prefix);
-        [$rawsSql, $rawsParams] = $this->convertToNamedPlaceholders(implode($joiner, $sqlRaws), $bindings, "{$prefix}raw_");
+        $rawBindingIndex = 0;
 
-        return [implode($joiner, array_filter([$pairsSql, $rawsSql])), array_merge($pairsParams, $rawsParams)];
+        foreach ($data as $key => $value) {
+            if (is_numeric($key)) {
+                // Raw SQL like "updated_at = NOW()" or "date > ?". Positional values for raw
+                // fragments are consumed from $bindings in the same order as the fragments.
+                $clause = (string)$value;
+                $questionCount = substr_count($clause, '?');
+                for ($i = 0; $i < $questionCount; $i++) {
+                    if (!array_key_exists($rawBindingIndex, $rawPositionalBindings)) {
+                        throw new InvalidArgumentException(
+                            'Not enough positional bindings for raw SQL clause placeholders'
+                        );
+                    }
+                    $questionBindings[] = $rawPositionalBindings[$rawBindingIndex++];
+                }
+                $clauses[] = $clause;
+                continue;
+            }
+
+            if (str_contains($key, '?')) {
+                // A keyed `?` entry binds its value directly. Use a numeric raw SQL entry plus
+                // $bindings when one clause contains more than one positional placeholder.
+                if (substr_count($key, '?') !== 1) {
+                    throw new InvalidArgumentException(
+                        'A keyed SQL clause must contain exactly one ? placeholder'
+                    );
+                }
+                $clauses[] = $key;
+                $questionBindings[] = $value;
+                continue;
+            }
+
+            // Key-value pair like "users.name" => "John".
+            $keySafe = str_replace('.', '_dot_', $key);
+            $placeholder = ":{$prefix}{$keySafe}";
+            $clauses[] = "{$key} = {$placeholder}";
+            $params[$placeholder] = $value;
+        }
+
+        if ($rawBindingIndex < count($rawPositionalBindings)) {
+            throw new InvalidArgumentException(
+                'More positional clause bindings were provided than SQL placeholders'
+            );
+        }
+
+        [$sql, $questionParams] = $this->convertToNamedPlaceholders(
+            implode($joiner, $clauses),
+            $questionBindings,
+            $prefix
+        );
+
+        return [
+            $sql,
+            array_merge($params, $questionParams, $namedBindings),
+        ];
     }
 
     /**
@@ -1014,9 +1152,8 @@ trait CommonModelPicoPdoTrait
      * - Raw SQL condition without bindings
      * - Automatic expansion of arrays for `IN (:placeholder)` and `IN (?)` patterns
      *
-     * For UPDATE/DELETE operations, if no WHERE clause is provided,
-     * an invalid `WHERE` clause (`WHERE `) will be returned, triggering a PDO exception
-     * to prevent accidental full-table operations.
+     * UPDATE/DELETE validate the compiled result and throw `InvalidArgumentException` when
+     * no WHERE clause is provided, preventing accidental full-table operations.
      *
      * ### Examples (increasing complexity):
      *
@@ -1095,10 +1232,8 @@ trait CommonModelPicoPdoTrait
             [$where, $bindings] = $this->convertToNamedPlaceholders($where, (array)$bindings, $prefix);
         }
 
-        if (is_array($bindings) && array_filter($bindings, is_array(...))) {
-            [$where, $bindings] = $this->buildInQuery($where, $bindings);
-        }
-
+        // Array bindings are intentionally expanded only once, in prepExec(), after SELECT,
+        // JOIN, WHERE and SQL-tail fragments have been assembled into the final SQL string.
         if (str_contains($where, ':')) {
             return [$where, (array)$bindings];
         }
@@ -1148,77 +1283,56 @@ trait CommonModelPicoPdoTrait
 
 
     /**
-     * Compiles insert rows into per-shape VALUES batches in a single pass.
+     * Applies a batch update by staging the rows in a temporary table and joining against it.
      *
-     * Each row is parsed exactly once: string keys become bound `:row_{i}_col` placeholders, numeric keys
-     * carry raw SQL assignments like `'created_at = NOW()'` whose expression is inlined verbatim. Rows are
-     * then grouped by their column list, so {@see insert()} can execute one multi-row statement per shape.
-     * The row index `{i}` is global across the whole payload, keeping placeholders unique between batches.
+     * The values move out of the SQL text and into data, so the UPDATE is one fixed-size
+     * statement however many rows are involved, and the server resolves each row with an index
+     * lookup instead of walking a CASE list.
      *
-     * ```
-     * buildInsertBatches([
-     *     ['name' => 'Ion', 'created_at = NOW()'],
-     *     ['name' => 'Ani', 'created_at = NOW()'],
-     * ]);
-     * // Returns:
-     * // [
-     * //     'name|created_at' => [
-     * //         'name, created_at',                                    // column list
-     * //         ['(:row_0_name, NOW())', '(:row_1_name, NOW())'],      // one value tuple per row
-     * //         [':row_0_name' => 'Ion', ':row_1_name' => 'Ani'],      // bound params
-     * //     ],
-     * // ]
-     * ```
+     * The staging table is created with `AS SELECT ... WHERE 1 = 0`, which copies the target's
+     * exact column types and nullability without its constraints or defaults; the join index is
+     * declared inline so no ALTER is needed. Temporary tables are private to this connection and
+     * do not trigger an implicit commit, so the whole sequence stays inside one transaction.
      *
-     * @param list<DataMap> $rows Insert rows (a single-row insert is passed as a one-element list).
-     * @return array<string, array{0: string, 1: list<string>, 2: BindingsMap}> Batches keyed by column
-     * signature: [column list SQL, row value tuples, bound params].
+     * @param list<DataMap> $data
+     * @param list<DataMap> $where
+     * @return int Rows actually changed, matching the CASE/WHEN path.
      */
-    private function buildInsertBatches(array $rows): array
+    private function tempTableUpdate(string $table, array $data, array $where): int
     {
-        $batches = [];
-        foreach ($rows as $i => $row) {
-            if ($row === []) {
-                // No columns to set: skip instead of emitting `INSERT INTO t () VALUES ()`, which
-                // would insert an all-defaults row.
-                continue;
-            }
-            $columns = $values = $params = [];
-            foreach ($row as $key => $value) {
-                if (is_numeric($key)) {
-                    // Raw SQL assignment: split 'created_at = NOW()' into column + inlined expression.
-                    [$column, $expression] = array_map(trim(...), explode('=', (string)$value, 2));
-                } else {
-                    // Key-value pair: bind the value under a per-row unique placeholder.
-                    [$column, $expression] = [$key, ":row_{$i}_{$key}"];
-                    $params[$expression] = $value;
-                }
-                $columns[] = $column;
-                $values[] = $expression;
-            }
-            $shape = implode('|', $columns);
-            $batches[$shape][0] = implode(', ', $columns);
-            $batches[$shape][1][] = '(' . implode(', ', $values) . ')';
-            $batches[$shape][2] = array_merge($batches[$shape][2] ?? [], $params);
+        $target = (string)CommonModelPicoPdoUtils::quoteIdentifier($table);
+        $keys = array_map(CommonModelPicoPdoUtils::quoteIdentifier(...), array_keys($where[0]));
+        $cols = array_map(CommonModelPicoPdoUtils::quoteIdentifier(...), array_keys($data[0]));
+        $staging = '`tmp_pico_update_' . uniqid() . '`';
+
+        $columnList = implode(', ', [...$keys, ...$cols]);
+
+        $pair = static fn(string $column): string => "t.{$column} = x.{$column}";
+
+        $rows = [];
+        foreach ($data as $i => $row) {
+            $rows[] = $where[$i] + $row;
         }
-        return $batches;
-    }
 
+        $rowCount = 0;
 
-    /**
-     * Batch payload = parallel lists: $data is a non-empty list of SET maps and $where a
-     * same-length list of row conditions (maps or column/condition strings).
-     *
-     * @param DataMap|list<DataMap> $data
-     * @param mixed $where
-     * @return bool
-     */
-    private function isBatchUpdatePayload(array $data, mixed $where): bool
-    {
-        return $data !== [] && array_is_list($data)
-            && is_array($where) && array_is_list($where) && count($where) === count($data)
-            && $data === array_filter($data, is_array(...))
-            && $where === array_filter($where, static fn($w) => is_array($w) || is_string($w));
+        // Several statements, so they have to be atomic; defers to the caller's transaction.
+        $this->withAtomicStatements(2, function () use ($staging, $keys, $columnList, $target, $rows, &$rowCount, $pair, $cols): void {
+            $this->pdo()->exec("DROP TEMPORARY TABLE IF EXISTS {$staging}");
+            $this->pdo()->exec(
+                "CREATE TEMPORARY TABLE {$staging} (INDEX idx_join (" . implode(', ', $keys) . '))'
+                . " AS SELECT {$columnList} FROM {$target} WHERE 1 = 0"
+            );
+
+            try {
+                $this->insert($staging, $rows);
+                $rowCount = $this->update("{$target} t JOIN {$staging} x", array_map($pair, $cols), array_map($pair, $keys));
+            } finally {
+                $this->pdo()->exec("DROP TEMPORARY TABLE IF EXISTS {$staging}");
+            }
+        });
+
+        return $rowCount;
     }
 
 
@@ -1283,7 +1397,7 @@ trait CommonModelPicoPdoTrait
             foreach ($row as $key => $value) {
                 // One entry at a time: a unique prefix per row+entry keeps `?` placeholders collision-free.
                 [$assignment, $assignParams] = $this->buildSqlClause([$key => $value], 'b' . $i . '_s' . $j++ . '_');
-                [$column, $expression] = array_map(trim(...), explode('=', $assignment, 2));
+                [$column, $expression] = CommonModelPicoPdoUtils::splitAssignment($assignment);
                 $cases[$column][] = "WHEN {$wheres[$i]} THEN {$expression}";
                 $params += $assignParams;
             }
@@ -1303,23 +1417,22 @@ trait CommonModelPicoPdoTrait
     }
 
 
-
-
-
     /**
-     * Keep a split batch all-or-nothing.
+     * Keep a multi-statement operation all-or-nothing.
      *
-     * One statement is atomic by itself; several are not, so when chunking actually splits the
-     * work this opens a transaction — unless the caller already runs one, whose commit then
-     * governs.
+     * One statement is atomic by itself; several are not, so this opens a transaction whenever
+     * the operation will execute more than one statement — unless the caller already runs one,
+     * whose commit then governs.
      *
      * @template T
+     * @param int $statementCount
      * @param callable():T $work
-     * @return T
+     * @return mixed
+     * @throws Throwable
      */
-    private function withAtomicChunks(int $chunkCount, callable $work): mixed
+    private function withAtomicStatements(int $statementCount, callable $work): mixed
     {
-        $ownTransaction = $chunkCount > 1 && !$this->pdo()->inTransaction();
+        $ownTransaction = $statementCount > 1 && !$this->pdo()->inTransaction();
         if ($ownTransaction) {
             $this->pdo()->beginTransaction();
         }
@@ -1329,83 +1442,12 @@ trait CommonModelPicoPdoTrait
             if ($ownTransaction) {
                 $this->pdo()->commit();
             }
-
             return $result;
-        } catch (\Throwable $e) {
-            // Must use leading `\`: this file is namespaced, so bare `Throwable` is not global.
-            $this->rollBackChunkTransactionIfOwned($ownTransaction);
+        } catch (Throwable $e) {
+            if ($ownTransaction) {
+                $this->pdo()->rollBack();
+            }
             throw $e;
         }
-    }
-
-    /**
-     * Rolls back a transaction opened by {@see withAtomicChunks()} for a multi-chunk batch.
-     * No-op when the caller already owned the transaction (or the batch was a single chunk).
-     */
-    private function rollBackChunkTransactionIfOwned(bool $owned): void
-    {
-        if (!$owned) {
-            return;
-        }
-        $this->pdo()->rollBack();
-    }
-
-
-    /**
-     * Splits rows into chunks whose statement fits the packet, halving while a chunk is too big.
-     *
-     * A single row is never split — it is the smallest unit a statement can carry, so an
-     * oversized row is returned as its own chunk and left to fail loudly rather than be
-     * silently truncated.
-     *
-     * @template TRow
-     * @param list<TRow> $rows
-     * @return list<list<TRow>> Never empty; a batch that already fits is returned unchanged.
-     */
-    private function chunkForPacket(array $rows): array
-    {
-        // A single row cannot be split further, so skip sizing it — this is the hot path for
-        // every non-batch write.
-        if (count($rows) < 2) {
-            return [$rows];
-        }
-
-        // serialize() over json_encode(): it never fails on binary column values, and its
-        // per-value overhead (`i:2;`, `s:5:"..."`) tracks the SQL scaffolding far more closely.
-        $size = strlen(serialize($rows));
-
-        if ($size < self::MAX_ALLOWED_PACKET * self::PACKET_FILL_RATIO) {
-            return [$rows];
-        }
-
-        $half = (int)ceil(count($rows) / 2);
-
-        return array_merge(
-            $this->chunkForPacket(array_slice($rows, 0, $half)),
-            $this->chunkForPacket(array_slice($rows, $half)),
-        );
-    }
-
-
-    /**
-     * Slices one chunk out of a parallel list.
-     *
-     * A batched write carries several inputs that run parallel per row — the SET maps, the WHERE
-     * rows and a per-row bindings list — so a chunk has to take the same slice of each.
-     * {@see buildUpdateSqlParts()} and {@see buildDeleteSqlParts()} read them positionally
-     * (`$bindings[$i]`), and chunks are uneven because {@see chunkForPacket()} halves, so the
-     * slice has to be taken by explicit offset and length rather than a fixed stride.
-     *
-     * A value that is not a list is shared by every row — a single bindings map, or a WHERE that
-     * applies throughout — and is passed through untouched.
-     *
-     * @param int|string|array<mixed>|null $value
-     * @return int|string|array<mixed>|null
-     */
-    private function chunkList(int|string|array|null $value, int $offset, int $length): int|string|array|null
-    {
-        return is_array($value) && array_is_list($value)
-            ? array_slice($value, $offset, $length)
-            : $value;
     }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Lodur\PicoPdo\Tests;
 
 use Lodur\PicoPdo\CommonModelPicoPdoTrait;
+use Lodur\PicoPdo\CommonModelPicoPdoUtils;
 use PDO;
 use PDOException;
 use PDOStatement;
@@ -213,11 +214,10 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testBuildInQueryWithNumericKeys(): void
     {
-        $sql = 'SELECT * FROM users WHERE id IN (?)';
-        $params = [0 => [1, 2, 3]];
-        [$newSql, $newParams] = $this->_testBuildInQuery($sql, $params);
-        $this->assertSame($sql, $newSql);
-        $this->assertSame([], $newParams);
+        // Positional array bindings are rejected — IN expansion needs a named placeholder.
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Array bindings require a named placeholder');
+        $this->_testBuildInQuery('SELECT * FROM users WHERE id IN (?)', [0 => [1, 2, 3]]);
     }
 
     public function testBuildInQueryWithArrayParameters(): void
@@ -265,9 +265,12 @@ class CommonModelPicoPdoTraitTest extends TestCase
             define('LODUR_TEST_SERVER', true);
 
             $sql = 'SELECT * FROM users WHERE id IN (:ids)';
-            [$newSql, $newParams] = $this->_testBuildInQuery($sql, [':ids' => []]);
-            $this->assertSame($sql, $newSql);
-            $this->assertSame([], $newParams);
+            try {
+                $this->_testBuildInQuery($sql, [':ids' => []]);
+                $this->fail('Expected InvalidArgumentException for empty IN list');
+            } catch (\InvalidArgumentException $e) {
+                $this->assertStringContainsString('cannot be empty', $e->getMessage());
+            }
 
             try {
                 $this->_testPrepExec('SELECT * FROM ' . self::TABLE_USERS . '_definitely_missing', []);
@@ -433,20 +436,20 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testBuildWhereQueryWithMixedConditions(): void
     {
+        // IN arrays stay intact here; prepExec() expands them once the final SQL is assembled.
         $bindings = [':name' => '%John%', ':status' => 'active', ':roles' => ['admin', 'moderator']];
         [$whereStr, $params] = $this->_testBuildWhereQuery(
             'email IS NOT NULL AND name LIKE :name AND status = :status AND role IN (:roles) AND created_at < NOW()',
             $bindings
         );
         $this->assertSame(
-            'email IS NOT NULL AND name LIKE :name AND status = :status AND role IN (:roles0,:roles1) AND created_at < NOW()',
+            'email IS NOT NULL AND name LIKE :name AND status = :status AND role IN (:roles) AND created_at < NOW()',
             $whereStr
         );
         $this->assertSame([
             ':name' => '%John%',
             ':status' => 'active',
-            ':roles0' => 'admin',
-            ':roles1' => 'moderator',
+            ':roles' => ['admin', 'moderator'],
         ], $params);
     }
 
@@ -499,8 +502,9 @@ class CommonModelPicoPdoTraitTest extends TestCase
             ['status = :status AND id > ?'],
             [':status' => 'active', 5]
         );
-        $this->assertSame('status = :status AND id > :where_raw_0', $whereStr);
-        $this->assertSame([':status' => 'active', ':where_raw_0' => 5], $params);
+        $this->assertSame('status = :status AND id > :where_0', $whereStr);
+        $this->assertSame(5, $params[':where_0']);
+        $this->assertSame('active', $params[':status']);
     }
 
     public function testBuildWhereQueryWithScalarBindingsAndPlaceholders(): void
@@ -781,18 +785,18 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $this->assertSame(2, $params[':b1_w_id']);
     }
 
-    public function testIsBatchUpdatePayloadRequiresParallelLists(): void
+    public function testIsRowSetDetectsBatchDataLists(): void
     {
-        $method = new \ReflectionMethod(self::class, 'isBatchUpdatePayload');
-        $method->setAccessible(true);
-        $this->assertFalse($method->invoke($this, [], []));
-        $this->assertFalse($method->invoke($this, [['name' => 'only data']], 'id'));
-        $this->assertFalse($method->invoke($this, [['name' => 'a']], ['id' => 1]));
-        $this->assertFalse($method->invoke($this, [['name' => 'a']], [['id' => 1], ['id' => 2]]));
-        $this->assertTrue($method->invoke($this, [['name' => 'A']], [['id' => 1]]));
-        $this->assertTrue($method->invoke($this, [['name' => 'A'], ['name' => 'B']], [['id' => 1], ['id' => 2]]));
-        $this->assertFalse($method->invoke($this, ['not-a-map'], [['id' => 1]]));
-        $this->assertFalse($method->invoke($this, [['name' => 'a']], [123]));
+        // Replaces the old trait-private isBatchUpdatePayload() — batch shape lives in Utils.
+        $this->assertFalse(CommonModelPicoPdoUtils::isRowSet([]));
+        $this->assertFalse(CommonModelPicoPdoUtils::isRowSet(['name' => 'single row']));
+        $this->assertFalse(CommonModelPicoPdoUtils::isRowSet(['not-a-map']));
+        $this->assertTrue(CommonModelPicoPdoUtils::isRowSet([['name' => 'A']]));
+        $this->assertTrue(CommonModelPicoPdoUtils::isRowSet([['name' => 'A'], ['name' => 'B']]));
+        // Gaps from array_filter() still count as a row set (unlike array_is_list()).
+        $this->assertTrue(CommonModelPicoPdoUtils::isRowSet([1 => ['name' => 'A'], 3 => ['name' => 'B']]));
+        $this->assertTrue(CommonModelPicoPdoUtils::hasOnlyIntKeys([['id' => 1], ['id' => 2]]));
+        $this->assertFalse(CommonModelPicoPdoUtils::hasOnlyIntKeys(['id' => 1]));
     }
 
     // ——— batch delete ———
@@ -969,9 +973,7 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testBuildInsertBatchesSkipsEmptyRows(): void
     {
-        $method = new \ReflectionMethod(self::class, 'buildInsertBatches');
-        $method->setAccessible(true);
-        $batches = $method->invoke($this, [
+        $batches = CommonModelPicoPdoUtils::buildInsertBatches([
             [],
             ['name' => 'Only'],
             [],
@@ -1025,7 +1027,9 @@ class CommonModelPicoPdoTraitTest extends TestCase
         );
 
         // Row 0 SET: bound column + raw SQL expression (numeric-key list entry).
-        $this->assertStringContainsString('WHEN id = :b0_w_id AND email_verified != 0 AND created_at > :since AND id IN (:ids0,:ids1,:ids2) THEN :b0_s0_name', $set);
+        // IN (:ids) stays compact until prepExec() expands the array binding.
+        $this->assertStringContainsString('WHEN id = :b0_w_id AND email_verified != 0 AND created_at > :since AND id IN (:ids) THEN :b0_s0_name', $set);
+        $this->assertSame([10, 11, 12], $params[':ids']);
         $this->assertStringContainsString('THEN views + 1', $set);
         $this->assertStringContainsString('ELSE views END', $set);
         // Row 1: associative WHERE only — no external bindings (`null` in the parallel list).
@@ -1250,9 +1254,9 @@ class CommonModelPicoPdoTraitTest extends TestCase
             'id IN (?)' => $ids,
             'created_at > ?' => $date,
         ]);
-        $this->assertStringContainsString('id IN (:where_00,:where_01,:where_02)', $where);
-        $this->assertStringContainsString('created_at > :where_1', $where);
-        $this->assertSame(1, $params[':where_00']);
+        // `?` → named here; the array itself expands later in prepExec().
+        $this->assertSame('id IN (:where_0) AND created_at > :where_1', $where);
+        $this->assertSame([1, 2, 3], $params[':where_0']);
         $this->assertSame($date, $params[':where_1']);
     }
 
@@ -1269,9 +1273,7 @@ class CommonModelPicoPdoTraitTest extends TestCase
     /** buildInsertBatches() doc example */
     public function testDocBuildInsertBatchesExample(): void
     {
-        $method = new \ReflectionMethod(self::class, 'buildInsertBatches');
-        $method->setAccessible(true);
-        $batches = $method->invoke($this, [
+        $batches = CommonModelPicoPdoUtils::buildInsertBatches([
             ['name' => 'Ion', 'created_at = NOW()'],
             ['name' => 'Ani', 'created_at = NOW()'],
         ]);
@@ -1387,10 +1389,9 @@ class CommonModelPicoPdoTraitTest extends TestCase
             ],
         ], 'ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
 
-        $this->assertStringContainsString('id IN (:ids0,:ids1)', $trait->lastSql);
+        $this->assertStringContainsString('id IN (:ids)', $trait->lastSql);
         $this->assertStringContainsString('status = :status', $trait->lastSql);
-        $this->assertSame(10, $trait->lastParams[':ids0']);
-        $this->assertSame(11, $trait->lastParams[':ids1']);
+        $this->assertSame([10, 11], $trait->lastParams[':ids']);
         $this->assertSame('active', $trait->lastParams[':status']);
         $this->assertSame(['A', 'B'], array_column($rows, 'name'));
     }
@@ -1472,14 +1473,14 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $this->assertSame('1', (string)$rows[0]['tag']);
     }
 
-    // ——— pdo() / withAtomicChunks coverage ———
+    // ——— pdo() / withAtomicStatements coverage ———
 
     public function testPdoResolverPrefersLegacyDbProperty(): void
     {
         $t = self::TABLE_USERS;
         $this->pdo->exec("INSERT INTO {$t} (id, name) VALUES (1, 'ViaDb')");
 
-        // Legacy models expose the handle as `$db` and leave `$pdo` uninitialised.
+        // Prefer `$db` when present (current codebase convention).
         $host = new class ($this->pdo) {
             use CommonModelPicoPdoTrait {
                 exists as public;
@@ -1498,7 +1499,30 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $this->assertTrue($host->exists($t, 'id', 1));
     }
 
-    public function testWithAtomicChunksRollsBackOwnedTransactionWhenWorkThrows(): void
+    public function testPdoResolverFallsBackToPdoProperty(): void
+    {
+        $t = self::TABLE_USERS;
+        $this->pdo->exec("INSERT INTO {$t} (id, name) VALUES (1, 'ViaPdo')");
+
+        $host = new class ($this->pdo) {
+            use CommonModelPicoPdoTrait {
+                exists as public;
+                pdo as public resolvePdo;
+            }
+
+            protected PDO $pdo;
+
+            public function __construct(PDO $pdo)
+            {
+                $this->pdo = $pdo;
+            }
+        };
+
+        $this->assertSame($this->pdo, $host->resolvePdo());
+        $this->assertTrue($host->exists($t, 'id', 1));
+    }
+
+    public function testWithAtomicStatementsRollsBackOwnedTransactionWhenWorkThrows(): void
     {
         $t = self::TABLE_USERS;
         $host = new class ($this->pdo) {
@@ -1511,15 +1535,15 @@ class CommonModelPicoPdoTraitTest extends TestCase
                 $this->pdo = $pdo;
             }
 
-            /** Exposes {@see withAtomicChunks()} for a focused rollback test. */
-            public function runAtomicChunks(int $chunkCount, callable $work): mixed
+            /** Exposes {@see withAtomicStatements()} for a focused rollback test. */
+            public function runAtomicStatements(int $statementCount, callable $work): mixed
             {
-                return $this->withAtomicChunks($chunkCount, $work);
+                return $this->withAtomicStatements($statementCount, $work);
             }
         };
 
         try {
-            $host->runAtomicChunks(2, static function () use ($host, $t): void {
+            $host->runAtomicStatements(2, static function () use ($host, $t): void {
                 $host->prepExec("INSERT INTO {$t} (id, name) VALUES (991, 'atomic-rollback')");
                 throw new \RuntimeException('chunk boom');
             });
@@ -1535,11 +1559,24 @@ class CommonModelPicoPdoTraitTest extends TestCase
         );
     }
 
-    public function testRollBackChunkTransactionIfOwnedRollsBackWhenOwned(): void
+    public function testPdoResolverThrowsWhenNoConnectionProperty(): void
+    {
+        $host = new class {
+            use CommonModelPicoPdoTrait {
+                pdo as public resolvePdo;
+            }
+        };
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('No valid PDO connection found');
+        $host->resolvePdo();
+    }
+
+    public function testUpdateRejectsEmptyDataAndInvalidBatchShapes(): void
     {
         $host = new class ($this->pdo) {
             use CommonModelPicoPdoTrait {
-                prepExec as public;
+                update as public;
             }
 
             public function __construct(PDO $pdo)
@@ -1548,25 +1585,48 @@ class CommonModelPicoPdoTraitTest extends TestCase
             }
         };
 
-        $t = self::TABLE_USERS;
-        $this->pdo->beginTransaction();
-        $host->prepExec("INSERT INTO {$t} (id, name) VALUES (993, 'owned-rb')");
+        try {
+            $host->update(self::TABLE_USERS, [], 'id', 1);
+            $this->fail('Expected empty data exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('UPDATE data cannot be empty', $e->getMessage());
+        }
 
-        $method = new \ReflectionMethod($host, 'rollBackChunkTransactionIfOwned');
-        $method->setAccessible(true);
-        $method->invoke($host, true);
+        try {
+            $host->update(self::TABLE_USERS, [['name' => 'A']], ['id' => 1]);
+            $this->fail('Expected batch WHERE shape exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Batch UPDATE requires one integer-keyed WHERE', $e->getMessage());
+        }
 
-        $this->assertFalse($this->pdo->inTransaction());
-        $this->assertSame(
-            0,
-            (int)$this->pdo->query("SELECT COUNT(*) FROM {$t} WHERE id = 993")->fetchColumn()
-        );
+        try {
+            $host->update(self::TABLE_USERS, [['name' => 'A'], []], [['id' => 1], ['id' => 2]]);
+            $this->fail('Expected empty batch row exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Batch UPDATE rows cannot be empty', $e->getMessage());
+        }
+
+        try {
+            $host->update(self::TABLE_USERS, [['name' => 'A'], ['name' => 'B']], [['id' => 1], []]);
+            $this->fail('Expected empty batch condition exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Batch UPDATE conditions cannot be empty', $e->getMessage());
+        }
+
+        try {
+            $host->update(self::TABLE_USERS, [['name' => 'A'], ['name' => 'B']], [['id' => 1], '   ']);
+            $this->fail('Expected blank batch condition exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Batch UPDATE conditions cannot be empty', $e->getMessage());
+        }
     }
 
-    public function testRollBackChunkTransactionIfOwnedNoopsWhenNotOwned(): void
+    public function testBatchUpdateRejectsLimitWhenPacketWouldSplit(): void
     {
         $host = new class ($this->pdo) {
-            use CommonModelPicoPdoTrait;
+            use CommonModelPicoPdoTrait {
+                update as public;
+            }
 
             public function __construct(PDO $pdo)
             {
@@ -1574,9 +1634,72 @@ class CommonModelPicoPdoTraitTest extends TestCase
             }
         };
 
-        $method = new \ReflectionMethod($host, 'rollBackChunkTransactionIfOwned');
-        $method->setAccessible(true);
-        $method->invoke($host, false);
-        $this->assertFalse($this->pdo->inTransaction());
+        // Oversized payload forces chunkForPacket to split before any statement runs.
+        $blob = str_repeat('Z', 2_100_000);
+        $data = [];
+        $where = [];
+        for ($i = 1; $i <= 10; $i++) {
+            $data[] = ['name' => $blob . $i];
+            $where[] = ['id' => $i];
+        }
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('LIMIT cannot be combined with a packet-split batch UPDATE');
+        $host->update(self::TABLE_USERS, $data, $where, null, 'LIMIT 10');
+    }
+
+    public function testBatchDeleteRejectsEmptyConditionAndLimitWhenPacketWouldSplit(): void
+    {
+        $host = new class ($this->pdo) {
+            use CommonModelPicoPdoTrait {
+                delete as public;
+            }
+
+            public function __construct(PDO $pdo)
+            {
+                $this->pdo = $pdo;
+            }
+        };
+
+        try {
+            $host->delete(self::TABLE_USERS, [['id' => 1], []]);
+            $this->fail('Expected empty batch DELETE condition exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('Batch DELETE conditions cannot be empty', $e->getMessage());
+        }
+
+        $blob = str_repeat('Z', 2_100_000);
+        $where = [];
+        for ($i = 1; $i <= 10; $i++) {
+            $where[] = ['name' => $blob . $i];
+        }
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('LIMIT cannot be combined with a packet-split batch DELETE');
+        $host->delete(self::TABLE_USERS, $where, null, 'LIMIT 10');
+    }
+
+    public function testBuildInQueryRejectsUnmatchedArrayBinding(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('has no matching SQL placeholder');
+        $this->_testBuildInQuery('SELECT * FROM users WHERE id = :id', [':ids' => [1, 2]]);
+    }
+
+    public function testBuildSqlClauseRejectsMultiQuestionKeyAndExtraBindings(): void
+    {
+        try {
+            $this->_testBuildSqlClause(['a = ? AND b = ?' => 1], 'set_');
+            $this->fail('Expected multi-? key exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('exactly one ? placeholder', $e->getMessage());
+        }
+
+        try {
+            $this->_testBuildSqlClause(['created_at = NOW()'], 'set_', ', ', [1, 2]);
+            $this->fail('Expected excess bindings exception');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('More positional clause bindings', $e->getMessage());
+        }
     }
 }
