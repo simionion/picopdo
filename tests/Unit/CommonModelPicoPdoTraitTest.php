@@ -1702,4 +1702,28 @@ class CommonModelPicoPdoTraitTest extends TestCase
             $this->assertStringContainsString('More positional clause bindings', $e->getMessage());
         }
     }
+
+    public function testInsertEmptyPayloadIsNoop(): void
+    {
+        $host = new class ($this->pdo) {
+            use CommonModelPicoPdoTrait {
+                insert as public;
+            }
+
+            public function __construct(PDO $pdo)
+            {
+                $this->pdo = $pdo;
+            }
+        };
+
+        $this->assertSame(0, $host->insert(self::TABLE_USERS, []));
+        $this->assertSame(
+            ['id' => 0, 'rows' => 0, 'status' => 'noop'],
+            $host->insert(self::TABLE_USERS, [], ['meta' => true])
+        );
+        $this->assertSame(
+            0,
+            (int)$this->pdo->query('SELECT COUNT(*) FROM ' . self::TABLE_USERS)->fetchColumn()
+        );
+    }
 }

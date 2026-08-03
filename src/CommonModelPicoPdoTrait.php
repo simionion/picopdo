@@ -11,6 +11,7 @@ use RuntimeException;
 use Throwable;
 
 
+
 /**
  * Trait CommonModelPicoPdoTrait
  *
@@ -105,8 +106,11 @@ use Throwable;
  *
  * - Scalar — used with column-name shorthand: `'id', 1`
  * - Positional list — for `?` placeholders: `['a@example.com', 'active']`
- * - Named map — for `:placeholder` keys: `[':status' => 'active', ':ids' => [1, 2, 3]]`
- * - Per-row list (batch UPDATE) — `[$bindingsRow0, $bindingsRow1, …]` aligned with `$data` / `$where`
+ * - Named map — for `:placeholder` keys: `[':status' => 'active', ':ids' => [1, 2, 3]]`.
+ *   On batch operations the map is shared: each name is bound once for the whole statement.
+ * - Per-row list (batch UPDATE/DELETE) — `[$bindingsRow0, $bindingsRow1, …]` aligned with `$data` /
+ *   `$where`. A `:name` reused across rows is isolated per row when the values differ; identical
+ *   values collapse to one shared bind.
  *
  * ### `$sqlTail` (`string|null`)
  * Raw SQL suffix appended to the generated statement (e.g. `'ORDER BY id'`, `'ORDER BY id LIMIT 10'`).
@@ -131,32 +135,20 @@ trait CommonModelPicoPdoTrait
     protected PDO $pdo;
 
     /**
-     * The connection every trait method runs on.
+     * The connection every trait method runs on: `$this->db`, else a legacy `$this->pdo`.
      *
-     * Prefers `$this->db`, which is the handle used throughout the codebase. Falls back to
-     * a legacy `$this->pdo` property so older models can adopt the upgraded trait without
-     * assigning both properties or resolving the connection by hand.
-     *
-     * `protected`, not private, so a class whose handle lives elsewhere (a lazy connection,
-     * a wrapper, a per-organisation link) can override it:
-     *
-     * ```php
-     * protected function pdo(): PDO
-     * {
-     *     return $this->connection->handle();
-     * }
-     * ```
-     *
-     * isset() on an uninitialised typed property is false rather than fatal, so the checks below
-     * are safe on a class that sets neither — that case raises a RuntimeException naming the
-     * missing connection, rather than PHP's less obvious "must not be accessed before
-     * initialization".
+     * Protected so a class holding its handle elsewhere can override it.
      */
     protected function pdo(): PDO
     {
-        foreach(['pdo', 'db', 'oDB'] as $property) {
-            if (isset($this->{$property}) && $this->{$property} instanceof PDO) {
-                return $this->{$property};
+        if (isset($this->pdo)) {
+            return $this->pdo;
+        }
+
+        $vars = get_object_vars($this);
+        foreach (['db', 'oDB'] as $property) {
+            if (($vars[$property] ?? null) instanceof PDO) {
+                return $vars[$property];
             }
         }
 
@@ -600,8 +592,9 @@ trait CommonModelPicoPdoTrait
                 return $rowCount;
             }
 
-            if (CommonModelPicoPdoUtils::canUpdateViaTempTable($table, $data, $where, $bindings, $sqlTail)) {
-                return $this->tempTableUpdate($table, $data, $where);
+            $tempPlan = CommonModelPicoPdoUtils::buildTempTableUpdate($table, $data, $where, $bindings, $sqlTail);
+            if ($tempPlan !== []) {
+                return $this->tempTableUpdate($data, $tempPlan);
             }
 
             [$setClause, $whereClause, $params] = $this->buildUpdateSqlParts($data, $where, $bindings);
@@ -1289,35 +1282,67 @@ trait CommonModelPicoPdoTrait
      * statement however many rows are involved, and the server resolves each row with an index
      * lookup instead of walking a CASE list.
      *
+     * Shared where predicates from {@see CommonModelPicoPdoUtils::buildTempTableUpdate()} are
+     * already qualified onto alias `t`; their user-supplied `:name` binds are always isolated
+     * under the `tmp_c_` prefix so they cannot collide with other clauses. Per-row plain
+     * equalities are staged.
+     *
      * The staging table is created with `AS SELECT ... WHERE 1 = 0`, which copies the target's
      * exact column types and nullability without its constraints or defaults; the join index is
      * declared inline so no ALTER is needed. Temporary tables are private to this connection and
      * do not trigger an implicit commit, so the whole sequence stays inside one transaction.
      *
      * @param list<DataMap> $data
-     * @param list<DataMap> $where
+     * @param array{
+     *     target: string,
+     *     rowWhere: list<DataMap>,
+     *     common: array<string|int, mixed>,
+     *     bindings: BindingsMap
+     * } $plan
      * @return int Rows actually changed, matching the CASE/WHEN path.
      */
-    private function tempTableUpdate(string $table, array $data, array $where): int
+    private function tempTableUpdate(array $data, array $plan): int
     {
-        $target = (string)CommonModelPicoPdoUtils::quoteIdentifier($table);
-        $keys = array_map(CommonModelPicoPdoUtils::quoteIdentifier(...), array_keys($where[0]));
+        $target = $plan['target'];
+        $keys = array_map(CommonModelPicoPdoUtils::quoteIdentifier(...), array_keys($plan['rowWhere'][0]));
         $cols = array_map(CommonModelPicoPdoUtils::quoteIdentifier(...), array_keys($data[0]));
         $staging = '`tmp_pico_update_' . uniqid() . '`';
 
         $columnList = implode(', ', [...$keys, ...$cols]);
-
         $pair = static fn(string $column): string => "t.{$column} = x.{$column}";
 
         $rows = [];
         foreach ($data as $i => $row) {
-            $rows[] = $where[$i] + $row;
+            $rows[] = $plan['rowWhere'][$i] + $row;
+        }
+
+        $updateWhere = array_map($pair, $keys);
+        $updateBindings = null;
+
+        if ($plan['common'] !== []) {
+            [$commonSql, $commonParams] = $this->buildWhereQuery($plan['common'], $plan['bindings'], 'tmp_c_');
+            [$commonSql, $updateBindings] = CommonModelPicoPdoUtils::isolateNamedPlaceholders(
+                $commonSql,
+                $commonParams,
+                'tmp_c_'
+            );
+            $updateWhere[] = $commonSql;
         }
 
         $rowCount = 0;
 
-        // Several statements, so they have to be atomic; defers to the caller's transaction.
-        $this->withAtomicStatements(2, function () use ($staging, $keys, $columnList, $target, $rows, &$rowCount, $pair, $cols): void {
+        $this->withAtomicStatements(2, function () use (
+            $staging,
+            $keys,
+            $columnList,
+            $target,
+            $rows,
+            &$rowCount,
+            $pair,
+            $cols,
+            $updateWhere,
+            $updateBindings
+        ): void {
             $this->pdo()->exec("DROP TEMPORARY TABLE IF EXISTS {$staging}");
             $this->pdo()->exec(
                 "CREATE TEMPORARY TABLE {$staging} (INDEX idx_join (" . implode(', ', $keys) . '))'
@@ -1326,7 +1351,12 @@ trait CommonModelPicoPdoTrait
 
             try {
                 $this->insert($staging, $rows);
-                $rowCount = $this->update("{$target} t JOIN {$staging} x", array_map($pair, $cols), array_map($pair, $keys));
+                $rowCount = $this->update(
+                    "{$target} t JOIN {$staging} x",
+                    array_map($pair, $cols),
+                    $updateWhere,
+                    $updateBindings
+                );
             } finally {
                 $this->pdo()->exec("DROP TEMPORARY TABLE IF EXISTS {$staging}");
             }
@@ -1348,15 +1378,41 @@ trait CommonModelPicoPdoTrait
         $params = [];
         $wheres = [];
         foreach ($whereRows as $i => $row) {
-            $rowBindings = is_array($bindings) && array_is_list($bindings) ? ($bindings[$i] ?? null) : $bindings;
-            [$wheres[$i], $whereParams] = $this->buildWhereQuery($row, $rowBindings, "b{$i}_w_");
-            $params += $whereParams;
+            $wheres[$i] = $this->compileBatchRowWhere($row, $bindings, $i, $params);
         }
 
         return [
             implode(' OR ', array_map(static fn(string $w): string => "({$w})", $wheres)),
             $params,
         ];
+    }
+
+    /**
+     * Compiles one batch row's WHERE and merges its binds into the statement params.
+     *
+     * A bindings list is sliced by row index; anything else (shared map / scalar) applies to
+     * every row. User-supplied `:name` binds that an earlier row already bound to a different
+     * value are renamed under `b{$i}_n_` so each row keeps its own value; a name re-bound to
+     * the same value stays shared and is bound once for the whole statement.
+     *
+     * @param DataMap|string $row
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings
+     * @param BindingsMap $params Statement params accumulated across rows (extended in place)
+     * @return string The compiled row WHERE fragment
+     */
+    private function compileBatchRowWhere(string|array $row, int|string|array|null $bindings, int $i, array &$params): string
+    {
+        $rowBindings = is_array($bindings) && array_is_list($bindings) ? ($bindings[$i] ?? null) : $bindings;
+        [$where, $whereParams] = $this->buildWhereQuery($row, $rowBindings, "b{$i}_w_");
+        [$where, $whereParams] = CommonModelPicoPdoUtils::isolateNamedPlaceholders(
+            $where,
+            $whereParams,
+            "b{$i}_n_",
+            $params
+        );
+        $params += $whereParams;
+
+        return $where;
     }
 
 
@@ -1389,9 +1445,7 @@ trait CommonModelPicoPdoTrait
         $cases = [];
 
         foreach ($dataRows as $i => $row) {
-            $rowBindings = is_array($bindings) && array_is_list($bindings) ? $bindings[$i] ?? null : $bindings;
-            [$wheres[$i], $whereParams] = $this->buildWhereQuery($whereRows[$i], $rowBindings, "b{$i}_w_");
-            $params += $whereParams;
+            $wheres[$i] = $this->compileBatchRowWhere($whereRows[$i], $bindings, $i, $params);
 
             $j = 0;
             foreach ($row as $key => $value) {

@@ -689,9 +689,9 @@ Each documented code example in the trait PHPDoc and this README has a matching 
 Test names for doc examples are prefixed with `testDoc`.
 
 Current test coverage (`make test` prints a text summary; `make test-coverage` generates HTML):
-- **266 tests** (128 unit, 138 integration)
+- **293 tests** (155 unit, 138 integration)
 - **100%** lines and methods on `CommonModelPicoPdoTrait` and `CommonModelPicoPdoUtils` (Xdebug)
-- Default suite without `@group slow`: **260 tests**; the slow group adds fixed-size timing gates plus ~5 000-row random UPDATE cases
+- Default suite without `@group slow`: **287 tests**; the slow group adds fixed-size timing gates plus ~5 000-row random UPDATE cases
 
 ```bash
 make test              # Run all tests (~40s includes @group slow batch UPDATE scale)

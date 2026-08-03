@@ -5,6 +5,8 @@ namespace Lodur\PicoPdo;
 
 
 
+use InvalidArgumentException;
+
 /**
  * Stateless helpers for {@see CommonModelPicoPdoTrait}.
  *
@@ -128,61 +130,323 @@ final class CommonModelPicoPdoUtils
     }
 
     /**
-     * Whether a batch update can be staged through a temporary table and applied with a JOIN.
+     * Build a temp-table batch UPDATE plan, or `[]` when the payload must stay on CASE/WHEN.
      *
-     * A JOIN can only express "match these columns by equality", so everything the CASE/WHEN
-     * form supports but a join cannot — raw SQL fragments, `?` keys, per-row bindings, a
-     * trailing LIMIT, rows with differing shapes — falls back. The check is deliberately strict:
-     * the fallback is merely slower, while a wrong join silently updates the wrong rows.
+     * Per-row JOIN keys must be plain column equalities. Conditions identical on every where-row
+     * are peeled off and applied once on alias `t` (shared `n > ?` / named placeholder / equality).
+     * Bindings feed only that shared clause: a named map, or a per-row list whose values for those
+     * placeholders are identical. Empty plan = fall back — never silently wrong.
      *
      * @param list<DataMap> $data
      * @param list<DataMap|string> $where
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings
+     * @return array{
+     *     target: string,
+     *     rowWhere: list<DataMap>,
+     *     common: array<string|int, mixed>,
+     *     bindings: BindingsMap
+     * }|array{}
      */
-    public static function canUpdateViaTempTable(string $table, array $data, array $where, mixed $bindings, string|null $sqlTail): bool
-    {
-        if (count($data) < self::TEMP_UPDATE_MIN_ROWS || $bindings !== null || trim((string)$sqlTail) !== '' || self::quoteIdentifier($table) === null) {
-            return false;
+    public static function buildTempTableUpdate(
+        string $table,
+        array $data,
+        array $where,
+        mixed $bindings,
+        string|null $sqlTail
+    ): array {
+        $target = self::quoteIdentifier($table);
+
+        if (
+            count($data) < self::TEMP_UPDATE_MIN_ROWS
+            || trim((string) $sqlTail) !== ''
+            || $target === null
+            || array_filter(
+                $where,
+                static fn(mixed $condition): bool => !is_array($condition)
+            )
+        ) {
+            return [];
         }
 
-        $keys = array_keys((array)($where[0] ?? []));
-        $cols = array_keys((array)($data[0] ?? []));
+        [$common, $rowWhere] = self::splitCommonWhereRows($where);
 
-        if ($keys === [] || $cols === [] || array_intersect($keys, $cols) !== []) {
-            return false;   // nothing to join on, nothing to set, or the join key is being rewritten
+        if ($rowWhere === []) {
+            return [];
         }
 
-        foreach ([...$keys, ...$cols] as $identifier) {
-            if (self::quoteIdentifier((string)$identifier) === null) {
-                return false;   // raw fragment, `col = ?` key, or a numeric (raw SQL) key
-            }
+        $cols = array_keys($data[0]);
+        $keys = array_keys($rowWhere[0]);
+
+        if (
+            $keys === []
+            || $cols === []
+            || array_intersect($keys, $cols) !== []
+            || array_filter(
+                [...$keys, ...$cols],
+                static fn(mixed $identifier): bool =>
+                    !is_string($identifier)
+                    || self::quoteIdentifier($identifier) === null
+            )
+        ) {
+            return [];
+        }
+
+        // Qualified against the columns the staging table will carry, so the shared clause can
+        // never leave an ambiguous bare reference behind.
+        $qualifiedCommon = self::qualifyWhereForAlias($common, 't', [...$keys, ...$cols]);
+
+        if ($common !== [] && $qualifiedCommon === []) {
+            return [];
+        }
+
+        $sharedBindings = self::sharedRowBindings($common, $bindings, count($data));
+        if ($sharedBindings === null) {
+            return [];
         }
 
         $seenConditions = [];
 
         foreach ($data as $i => $row) {
-            $condition = $where[$i] ?? null;
+            $condition = $rowWhere[$i];
 
-            if (!is_array($row) || !is_array($condition)
-                || array_keys($row) !== $cols || array_keys($condition) !== $keys) {
-                return false;   // rows must share one shape to become table columns
-            }
-
-            foreach ([...$row, ...$condition] as $value) {
-                if ($value !== null && !is_scalar($value)) {
-                    return false;
-                }
+            if (
+                array_keys($row) !== $cols
+                || array_keys($condition) !== $keys
+                || array_filter(
+                    [...$row, ...$condition],
+                    static fn(mixed $value): bool =>
+                        $value !== null && !is_scalar($value)
+                )
+            ) {
+                return [];
             }
 
             // CASE/WHEN has deterministic first-match behaviour for duplicate conditions; a
             // staging-table JOIN does not. Keep duplicates on the safe CASE/WHEN path.
             $conditionKey = serialize($condition);
+
             if (isset($seenConditions[$conditionKey])) {
-                return false;
+                return [];
             }
+
             $seenConditions[$conditionKey] = true;
         }
 
-        return true;
+        return [
+            'target' => $target,
+            'rowWhere' => $rowWhere,
+            'common' => $qualifiedCommon,
+            'bindings' => $sharedBindings,
+        ];
+    }
+
+    /**
+     * Prefix the leading column reference of every WHERE entry with `$alias.` for JOIN UPDATEs.
+     *
+     * Plain `col => val`, keyed `col … ?` / `col … :name`, and raw fragments that start with a
+     * column identifier are rewritten. Returns an empty array when any entry cannot be prefixed
+     * safely — callers treat that as “fall back” when the input was non-empty. An empty input
+     * stays empty (nothing to qualify).
+     *
+     * Only the *leading* identifier is prefixed, so a fragment naming several columns keeps its
+     * later references bare. Bare is fine while the name exists on one side of the JOIN only, and
+     * `$staged` — the columns the staging table carries — is what makes that checkable: a later
+     * reference to one of them is ambiguous to the server (error 1052), so the whole entry is
+     * refused instead. Pass `[]` to skip the check when nothing is staged alongside.
+     *
+     * @param array<string|int, mixed> $where
+     * @param list<string> $staged Columns present on the other side of the JOIN
+     * @return array<string|int, mixed>
+     */
+    public static function qualifyWhereForAlias(array $where, string $alias, array $staged = []): array
+    {
+        $qualified = [];
+
+        foreach ($where as $key => $value) {
+            $fragment = is_int($key) ? $value : $key;
+            $prefixed = is_string($fragment) ? self::prefixLeadingIdentifier($fragment, $alias) : null;
+
+            if ($prefixed === null || self::hasBareColumnReference($prefixed, $staged)) {
+                return [];
+            }
+
+            if (is_int($key)) {
+                $qualified[$key] = $prefixed;
+            } else {
+                $qualified[$prefixed] = $value;
+            }
+        }
+
+        return $qualified;
+    }
+
+    /**
+     * Whether a SQL fragment names one of `$columns` without a table qualifier.
+     *
+     * Deliberately blunt: every bare word is a candidate, so a column name appearing inside a
+     * string literal counts too. `:name` placeholders and already-qualified `x.name` references
+     * do not — they cannot be ambiguous. Over-reporting only costs the caller its fast path.
+     *
+     * @param list<string> $columns
+     */
+    public static function hasBareColumnReference(string $sql, array $columns): bool
+    {
+        if ($columns === [] || preg_match_all('/(?<![:.\w])[A-Za-z_][A-Za-z0-9_]*/', $sql, $matches) < 1) {
+            return false;
+        }
+
+        $columns = array_map(strtolower(...), $columns);
+
+        foreach ($matches[0] as $word) {
+            if (in_array(strtolower($word), $columns, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Resolve bindings for the shared (peeled) WHERE clause of a temp-table UPDATE.
+     *
+     * The same rule as the WHERE peel, applied to bindings: only values identical on every row
+     * can feed the shared clause. A per-row list is reduced with {@see splitCommonWhereRows()};
+     * a plain named map is used as-is. Returns exactly the placeholders `$common` references —
+     * `:name` binds plus the leading positional values its raw fragments consume — or `null` when
+     * one of them is missing or varies per row (caller falls back).
+     *
+     * @param array<string|int, mixed> $common
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings
+     * @return BindingsMap|null
+     */
+    public static function sharedRowBindings(array $common, mixed $bindings, int $rowCount): array|null
+    {
+        $names = self::namedPlaceholdersInWhere($common);
+        $positional = self::positionalPlaceholdersInWhere($common);
+        $bindings = self::normalizePositionalBindings($bindings) ?? [];
+
+        if (!is_array($bindings)) {
+            // A scalar can only feed the single-column shorthand, never a batch clause.
+            return null;
+        }
+
+        if ($bindings !== [] && self::hasOnlyIntKeys($bindings)) {
+            if (
+                count($bindings) !== $rowCount
+                || array_filter($bindings, static fn(mixed $row): bool => !is_array($row))
+            ) {
+                return null;
+            }
+            [$bindings] = self::splitCommonWhereRows($bindings);
+        }
+
+        $shared = array_intersect_key($bindings, array_flip($names));
+
+        if (count($shared) !== count($names)) {
+            return null;
+        }
+
+        // Raw fragments draw on the positional list in order, so the shared clause needs indexes
+        // 0..n-1 present — and no more than it consumes, which buildSqlClause() rejects.
+        for ($i = 0; $i < $positional; $i++) {
+            if (!array_key_exists($i, $bindings)) {
+                return null;
+            }
+            $shared[$i] = $bindings[$i];
+        }
+
+        return $shared;
+    }
+
+    /**
+     * Rewrite user-supplied `:name` placeholders under `$prefix` so they cannot collide with
+     * other clauses. Already-prefixed names are left untouched.
+     *
+     * With `$bound = null` every user name is renamed (shared-clause isolation). With a map of
+     * already-bound params, only genuine conflicts are renamed: a name re-bound to the same
+     * value stays shared and is bound once for the whole statement — the bindings analogue of
+     * the identical-condition peel in {@see buildTempTableUpdate()}.
+     *
+     * @param BindingsMap $params
+     * @param BindingsMap|null $bound Params accumulated from earlier batch rows
+     * @return array{0: string, 1: BindingsMap}
+     */
+    public static function isolateNamedPlaceholders(
+        string $sql,
+        array $params,
+        string $prefix,
+        array|null $bound = null
+    ): array {
+        $out = [];
+
+        foreach ($params as $name => $value) {
+            $bare = is_string($name) && str_starts_with($name, ':') ? substr($name, 1) : null;
+            $isConflict = $bound === null
+                || (array_key_exists($name, $bound) && $bound[$name] !== $value);
+
+            if ($bare === null || str_starts_with($bare, $prefix) || !$isConflict) {
+                $out[$name] = $value;
+                continue;
+            }
+
+            $isolated = ':' . $prefix . $bare;
+            $sql = preg_replace('/' . preg_quote($name, '/') . '\b/', $isolated, $sql) ?? $sql;
+            $out[$isolated] = $value;
+        }
+
+        return [$sql, $out];
+    }
+
+    /**
+     * @param array<string|int, mixed> $where
+     * @return list<string> Placeholder names including the leading colon
+     */
+    public static function namedPlaceholdersInWhere(array $where): array
+    {
+        $sql = implode(' ', array_filter(
+            [...array_keys($where), ...array_values($where)],
+            is_string(...)
+        ));
+        preg_match_all('/:[A-Za-z_][A-Za-z0-9_]*/', $sql, $matches);
+
+        return array_values(array_unique($matches[0]));
+    }
+
+    /**
+     * How many positional `?` a WHERE map consumes from the bindings list.
+     *
+     * Only numeric-keyed raw fragments draw on that list; a keyed `col > ?` entry carries its own
+     * value and is not counted — the same split {@see CommonModelPicoPdoTrait::buildSqlClause()}
+     * makes when it compiles the clause.
+     *
+     * @param array<string|int, mixed> $where
+     */
+    public static function positionalPlaceholdersInWhere(array $where): int
+    {
+        $count = 0;
+
+        foreach ($where as $key => $fragment) {
+            if (is_numeric($key) && is_string($fragment)) {
+                $count += substr_count($fragment, '?');
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Prefix the leading column identifier with `$alias.`, or null when the fragment does not
+     * start with one (e.g. `(col …)`) — the caller then falls back rather than guess a prefix.
+     *
+     * An already-qualified `tbl.col` is refused too: the alias replaces the table name in the
+     * JOIN, so neither prefixing it (`t.tbl.col`) nor leaving it be resolves to anything.
+     */
+    public static function prefixLeadingIdentifier(string $sql, string $alias): string|null
+    {
+        return preg_match('/^(\s*)`?([A-Za-z_][A-Za-z0-9_]*)`?(.*)$/s', $sql, $matches) === 1
+        && !str_starts_with($matches[3], '.')
+            ? "{$matches[1]}{$alias}.{$matches[2]}{$matches[3]}"
+            : null;
     }
 
     /**
@@ -249,7 +513,11 @@ final class CommonModelPicoPdoUtils
         return preg_match('/\bLIMIT\b/i', (string)$sqlTail) === 1;
     }
 
-    /** Whether insert rows require more than one per-column-shape statement. */
+    /**
+     * Whether insert rows require more than one per-column-shape statement.
+     *
+     * @param array<int|string, mixed> $rows
+     */
     public static function hasMultipleInsertShapes(array $rows): bool
     {
         $firstShape = null;
@@ -277,7 +545,11 @@ final class CommonModelPicoPdoUtils
         return false;
     }
 
-    /** Whether every key is an integer; unlike array_is_list(), gaps are accepted. */
+    /**
+     * Whether every key is an integer; unlike array_is_list(), gaps are accepted.
+     *
+     * @param array<int|string, mixed> $value
+     */
     public static function hasOnlyIntKeys(array $value): bool
     {
         foreach ($value as $key => $_) {
@@ -298,6 +570,8 @@ final class CommonModelPicoPdoUtils
      * through to the single-row path, producing `INSERT INTO t (Array) VALUES ()` rather than an
      * error. Column names are strings, so a single row never satisfies this test, not even one
      * whose value is an array (`['ids' => [1, 2]]`).
+     *
+     * @phpstan-assert-if-true array<int, array<string|int, mixed>> $value
      */
     public static function isRowSet(mixed $value): bool
     {
@@ -349,7 +623,7 @@ final class CommonModelPicoPdoUtils
     {
         $table = trim($table, "` \t\n\r\0\x0B");
         if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table) !== 1) {
-            throw new \InvalidArgumentException("Invalid table name: {$table}");
+            throw new InvalidArgumentException("Invalid table name: {$table}");
         }
 
         return $table;
@@ -372,7 +646,7 @@ final class CommonModelPicoPdoUtils
     {
         $whereClause = trim($whereClause);
         if ($whereClause === '') {
-            throw new \InvalidArgumentException("{$operation} requires a WHERE condition");
+            throw new InvalidArgumentException("{$operation} requires a WHERE condition");
         }
 
         return preg_match('/^WHERE\b/i', $whereClause) === 1
@@ -380,12 +654,16 @@ final class CommonModelPicoPdoUtils
             : 'WHERE ' . $whereClause;
     }
 
-    /** Split a raw `column = expression` assignment and reject malformed entries early. */
+    /**
+     * Split a raw `column = expression` assignment and reject malformed entries early.
+     *
+     * @return array{0: string, 1: string} Column and expression, both non-empty.
+     */
     public static function splitAssignment(string $assignment): array
     {
         $parts = explode('=', $assignment, 2);
         if (count($parts) !== 2) {
-            throw new \InvalidArgumentException(
+            throw new InvalidArgumentException(
                 "Raw SQL assignment must contain '=': {$assignment}"
             );
         }
@@ -393,11 +671,47 @@ final class CommonModelPicoPdoUtils
         $column = trim($parts[0]);
         $expression = trim($parts[1]);
         if ($column === '' || $expression === '') {
-            throw new \InvalidArgumentException(
+            throw new InvalidArgumentException(
                 "Raw SQL assignment is incomplete: {$assignment}"
             );
         }
 
         return [$column, $expression];
+    }
+
+    /**
+     * Split batch WHERE rows into conditions shared by every row and conditions
+     * that vary per row.
+     *
+     * @param list<array<string|int, mixed>> $whereRows
+     * @return array{
+     *     0: array<string|int, mixed>,
+     *     1: list<array<string|int, mixed>>
+     * }
+     */
+    public static function splitCommonWhereRows(array $whereRows): array
+    {
+        $common = $whereRows[0] ?? [];
+
+        foreach (array_slice($whereRows, 1) as $row) {
+            $common = array_filter(
+                $common,
+                static fn(
+                    mixed $value,
+                    int|string $key
+                ): bool => array_key_exists($key, $row)
+                    && $row[$key] === $value,
+                ARRAY_FILTER_USE_BOTH
+            );
+        }
+
+        return [
+            $common,
+            array_map(
+                static fn(array $row): array =>
+                array_diff_key($row, $common),
+                $whereRows
+            ),
+        ];
     }
 }
