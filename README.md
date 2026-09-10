@@ -11,7 +11,15 @@ A lightweight PDO trait for PHP models that provides common database operations 
 - **Keys with `?` placeholders** - Direct binding syntax: `['date > ?' => $date]`
 - **INSERT modes** - INSERT, REPLACE, INSERT IGNORE, ON DUPLICATE KEY UPDATE
 - **Packet-safe batching** - oversized INSERT / UPDATE / DELETE batches are split under a 16 MiB `max_allowed_packet` budget; multi-chunk work runs in one owned transaction (all-or-nothing)
-- **100% test coverage** across unit and integration tests
+- **Statement diagnostics** — optional one-shot EXPLAIN/SHOW WARNINGS callbacks with typed bindings
+- **Empty write collections** — INSERT/UPDATE data `[]` and DELETE conditions `[]` perform no SQL
+- **Unit and integration tests** against MariaDB/MySQL
+
+## Standalone scope
+
+The library retains its own namespace and imports. The Lodur-only methods `getTableColumns()`,
+`removeInvalidColumns()` and `validateLanguageColumn()` are intentionally excluded: their schema,
+cache and language dependencies belong to the application.
 
 ## Requirements
 
@@ -228,6 +236,36 @@ $affected = $model->delete('users', [
 ]);
 // → DELETE … WHERE (id = 1 AND status = 'inactive' AND …) OR (id = 2 AND …)
 ```
+
+### Empty write collections
+
+```php
+$model->insert('users', []);          // 0
+$model->update('users', [], []);      // 0
+$model->delete('users', []);          // 0
+```
+
+Empty UPDATE data and an empty DELETE condition list return integer `0` before connection access,
+SQL compilation or debug callback consumption. Nonempty writes still reject missing/blank WHERE
+conditions, malformed batch shapes and empty IN bindings. An empty member inside a nonempty
+batch is invalid. SQL preparation/execution failures throw `PDOException`, including when the
+connection uses `PDO::ERRMODE_SILENT`; the library leaves connection attributes unchanged.
+
+### Statement diagnostics
+
+```php
+$model->debugNextStatement(function (array $result): void {
+    // $result['explain'] and $result['warnings'] contain the diagnostic rows.
+});
+$model->selectAll('users', ['id', 'name'], ['id IN (?)' => [1, 2]]);
+```
+
+The callback runs once, before the next statement, after `EXPLAIN EXTENDED` and `SHOW WARNINGS`
+on the same connection. An unavailable EXPLAIN yields empty diagnostics; unavailable SHOW WARNINGS can yield an empty
+warnings list. Optional diagnostic SQL failures allow the actual statement to proceed. Registering another callback replaces the pending one.
+Without a callback, logging uses the existing optional `LODUR_TEST_SERVER` flag; define it as true
+to enable chunked `error_log` output. A callback works without that flag or any Lodur bootstrap.
+The former trait helper `getPdoDebug()` now lives at `CommonModelPicoPdoUtils::getPdoDebug()`.
 
 ### EXISTS
 
@@ -561,7 +599,7 @@ $model->update('users', $data, $where, $bindings);
 
 ### Step 10 — DELETE
 
-Same `$where` / `$bindings` as SELECT; `$where` is required (no accidental full-table delete through an empty filter):
+Same `$where` / `$bindings` as SELECT. An empty condition array returns `0`; a blank string is rejected. Nonempty writes require a WHERE condition:
 
 ```php
 $model->delete('users', 'id', 1);
@@ -688,13 +726,18 @@ Each documented code example in the trait PHPDoc and this README has a matching 
 `tests/Unit/CommonModelPicoPdoTraitBatchUpdateScaleTest.php` (`@group slow`).
 Test names for doc examples are prefixed with `testDoc`.
 
-Current test coverage (`make test` prints a text summary; `make test-coverage` generates HTML):
-- **293 tests** (155 unit, 138 integration)
-- **100%** lines and methods on `CommonModelPicoPdoTrait` and `CommonModelPicoPdoUtils` (Xdebug)
-- Default suite without `@group slow`: **287 tests**; the slow group adds fixed-size timing gates plus ~5 000-row random UPDATE cases
+Verified on PHP 8.3.32 / PHPUnit 10.5.64 / MariaDB 10.6:
+- **329 tests** (181 unit, 148 integration), **63,048 assertions**, no failures/errors/skips with Xdebug off.
+- **100%** lines (670/670) and methods (49/49) across both source files with Xdebug coverage.
+- Coverage run: 329 tests and 63,032 assertions. Timing assertions are disabled under coverage;
+  the complete timing checks passed separately with `XDEBUG_MODE=off`.
+- Updated tests cover typed bindings, one-shot diagnostics, PDO SILENT/EXCEPTION behavior,
+  scalar/batch REPLACE metadata and empty-write collections. The tracked `coverage.txt` and
+  `coverage.xml` files contain the refreshed coverage results.
 
 ```bash
-make test              # Run all tests (~40s includes @group slow batch UPDATE scale)
+docker compose exec -T -e XDEBUG_MODE=off app vendor/bin/phpunit  # Includes timing assertions
+make test              # Run all tests with coverage
 make test-coverage     # Generate HTML coverage report
 # Skip the multi-second scale suite when iterating:
 #   docker-compose exec app vendor/bin/phpunit --exclude-group slow

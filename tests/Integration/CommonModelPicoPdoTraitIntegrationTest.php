@@ -4,6 +4,7 @@ namespace Lodur\PicoPdo\Tests\Integration;
 
 use Lodur\PicoPdo\CommonModelPicoPdoTrait;
 use PDOException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use PDO;
 
@@ -57,6 +58,7 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
                 delete as public;
                 exists as public;
                 prepExec as public;
+                debugNextStatement as public;
             }
             
             public function __construct(PDO $pdo)
@@ -516,10 +518,104 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
             'email' => 'test@example.com' // Same email, will trigger REPLACE
         ];
         $newId = $this->trait->insertReplace('test_users', $replaceData);
+        $this->assertIsInt($newId);
+        $this->assertGreaterThan($id, $newId);
         
         // Verify replacement
         $result = $this->trait->selectOne('test_users', ['name'], 'id', $newId);
         $this->assertEquals('Replaced User', $result['name']);
+    }
+
+    public function testInsertReplaceBatchReturnsMetadataAndReplacesEveryMatchingRow(): void
+    {
+        $this->trait->insert('test_users', [
+            ['id' => 10, 'name' => 'Old A', 'email' => 'a@example.com'],
+            ['id' => 20, 'name' => 'Old B', 'email' => 'b@example.com'],
+        ]);
+
+        $result = $this->trait->insertReplace('test_users', [
+            ['id' => 10, 'name' => 'New A', 'email' => 'a@example.com'],
+            ['id' => 20, 'name' => 'New B', 'email' => 'b@example.com'],
+        ]);
+
+        $this->assertIsArray($result);
+        $this->assertSame(['id', 'rows', 'status'], array_keys($result));
+        $this->assertIsInt($result['id']);
+        $this->assertSame(4, $result['rows'], 'REPLACE counts both the removed and inserted row');
+        $this->assertSame('inserted', $result['status']);
+        $this->assertSame([
+            ['id' => 10, 'name' => 'New A'],
+            ['id' => 20, 'name' => 'New B'],
+        ], $this->trait->selectAll('test_users', 'id, name', null, null, 'ORDER BY id'));
+        $this->assertSame(0, $this->trait->insertReplace('test_users', []));
+        $this->assertSame(['id' => 0, 'rows' => 0, 'status' => 'noop'], $this->trait->insertReplace('test_users', [[]]));
+    }
+
+    public function testDebugNextStatementReportsPlanForExpandedInAndTypedLimit(): void
+    {
+        $this->trait->insert('test_users', [
+            ['id' => 1, 'name' => 'A', 'email' => 'a@example.com'],
+            ['id' => 2, 'name' => 'B', 'email' => 'b@example.com'],
+        ]);
+        $results = [];
+        $this->trait->debugNextStatement(static function (array $result) use (&$results): void {
+            $results[] = $result;
+        });
+
+        $statement = $this->trait->prepExec(
+            'SELECT name FROM test_users WHERE id IN (:ids) ORDER BY id LIMIT :limit',
+            ['ids' => [1, 2], 'limit' => 1]
+        );
+        $this->assertSame(['A'], $statement->fetchAll(PDO::FETCH_COLUMN));
+        $this->trait->selectAll('test_users');
+        $this->assertCount(1, $results);
+        $this->assertNotEmpty($results[0]['explain']);
+        $this->assertContains('test_users', array_column($results[0]['explain'], 'table'));
+        $this->assertContains(1003, array_column($results[0]['warnings'], 'Code'));
+    }
+
+    #[DataProvider('pdoErrorModes')]
+    public function testUnsupportedExplainDoesNotAbortValidSql(int $errorMode, bool $emulated): void
+    {
+        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, $errorMode);
+        $this->pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, $emulated);
+        $results = [];
+        $this->trait->debugNextStatement(static function (array $result) use (&$results): void {
+            $results[] = $result;
+        });
+        $this->trait->prepExec('SET @pico_debug_probe = ?', [42]);
+        $this->assertSame(42, (int)$this->pdo->query('SELECT @pico_debug_probe')->fetchColumn());
+        $this->assertSame([['explain' => [], 'warnings' => []]], $results);
+        $this->assertSame($errorMode, $this->pdo->getAttribute(PDO::ATTR_ERRMODE));
+    }
+
+    #[DataProvider('pdoErrorModes')]
+    public function testSqlFailureStillThrowsWhenDiagnosticsAreEnabled(int $errorMode, bool $emulated): void
+    {
+        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, $errorMode);
+        $this->pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, $emulated);
+        $results = [];
+        $this->trait->debugNextStatement(static function (array $result) use (&$results): void {
+            $results[] = $result;
+        });
+        try {
+            $this->trait->prepExec('SELECT * FROM pico_missing_diagnostics_table');
+            $this->fail('Real SQL failures must propagate even when diagnostics are optional');
+        } catch (PDOException $error) {
+            $this->assertStringContainsString('pico_missing_diagnostics_table', $error->getMessage());
+            $this->assertSame([['explain' => [], 'warnings' => []]], $results);
+        }
+        $this->assertSame($errorMode, $this->pdo->getAttribute(PDO::ATTR_ERRMODE));
+        $this->assertSame(1, (int)$this->trait->prepExec('SELECT 1')->fetchColumn());
+        $this->assertCount(1, $results, 'A failed real statement still consumes its one-shot diagnostic');
+    }
+
+    public static function pdoErrorModes(): iterable
+    {
+        yield 'silent native prepare' => [PDO::ERRMODE_SILENT, false];
+        yield 'silent emulated prepare' => [PDO::ERRMODE_SILENT, true];
+        yield 'exception native prepare' => [PDO::ERRMODE_EXCEPTION, false];
+        yield 'exception emulated prepare' => [PDO::ERRMODE_EXCEPTION, true];
     }
 
     public function testInsertIgnore()

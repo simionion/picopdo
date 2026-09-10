@@ -5,6 +5,10 @@ declare(strict_types=1);
 namespace Lodur\PicoPdo\Tests;
 
 use Lodur\PicoPdo\CommonModelPicoPdoUtils;
+use PDO;
+use PDOStatement;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -12,6 +16,76 @@ use PHPUnit\Framework\TestCase;
  */
 class CommonModelPicoPdoUtilsTest extends TestCase
 {
+    public function testBindValuesPreservesTypesAndNormalizesPlaceholderNames(): void
+    {
+        $statement = $this->createMock(PDOStatement::class);
+        $bound = [];
+        $statement->expects($this->exactly(7))->method('bindValue')
+            ->willReturnCallback(static function (string|int $parameter, mixed $value, int $type) use (&$bound): bool {
+                $bound[] = [$parameter, $value, $type];
+                return true;
+            });
+
+        CommonModelPicoPdoUtils::bindValues($statement, [42, false, null]);
+        CommonModelPicoPdoUtils::bindValues($statement, [
+            'enabled' => true,
+            ':code' => '0042',
+            'ratio' => 1.25,
+            'empty' => '',
+        ]);
+
+        $this->assertSame([
+            [1, 42, PDO::PARAM_INT],
+            [2, false, PDO::PARAM_BOOL],
+            [3, null, PDO::PARAM_NULL],
+            [':enabled', true, PDO::PARAM_BOOL],
+            [':code', '0042', PDO::PARAM_STR],
+            [':ratio', 1.25, PDO::PARAM_STR],
+            [':empty', '', PDO::PARAM_STR],
+        ], $bound);
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testErrorLogChunksSplitsTextAndEncodesStructuredDiagnostics(): void
+    {
+        define('LODUR_TEST_SERVER', true);
+        $logFile = tempnam(sys_get_temp_dir(), 'pico_log_');
+        $previousErrorLog = ini_set('error_log', $logFile);
+        try {
+            CommonModelPicoPdoUtils::errorLogChunks(str_repeat('x', 1201));
+            CommonModelPicoPdoUtils::errorLogChunks(['url' => 'https://example.test/é']);
+            CommonModelPicoPdoUtils::errorLogChunks([]);
+            $lines = file($logFile, FILE_IGNORE_NEW_LINES);
+            $messages = array_map(static fn (string $line): string => preg_replace('/^\[[^\]]+\] /', '', $line), $lines);
+            $this->assertSame([
+                str_repeat('x', 600),
+                str_repeat('x', 600),
+                'x',
+                '{"url":"https://example.test/é"}',
+            ], $messages);
+        } finally {
+            ini_set('error_log', $previousErrorLog);
+            unlink($logFile);
+        }
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testErrorLogChunksStaysSilentWhenTestLoggingIsDisabled(): void
+    {
+        define('LODUR_TEST_SERVER', false);
+        $logFile = tempnam(sys_get_temp_dir(), 'pico_log_');
+        $previousErrorLog = ini_set('error_log', $logFile);
+        try {
+            CommonModelPicoPdoUtils::errorLogChunks('Diagnostic details');
+            $this->assertSame('', file_get_contents($logFile));
+        } finally {
+            ini_set('error_log', $previousErrorLog);
+            unlink($logFile);
+        }
+    }
+
     public function testAppendLimitOneAddsLimitWhenMissing(): void
     {
         $this->assertSame('LIMIT 1', CommonModelPicoPdoUtils::appendLimitOne(null));

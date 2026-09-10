@@ -3,9 +3,10 @@ declare(strict_types=1);
 
 namespace Lodur\PicoPdo;
 
-
-
 use InvalidArgumentException;
+use PDO;
+use PDOException;
+use PDOStatement;
 
 /**
  * Stateless helpers for {@see CommonModelPicoPdoTrait}.
@@ -14,12 +15,14 @@ use InvalidArgumentException;
  * same name silently wins — no error, no warning — so a model that happens to declare, say,
  * `chunkList()` would quietly break the trait from the inside. Everything here that needs no
  * connection lives outside the trait for that reason; only the methods that genuinely require
- * `$this` (the PDO handle, or the trait's own SQL builders) remain in it.
+ * `$this` (the PDO handle via {@see CommonModelPicoPdoTrait::pdo()}, or the trait's own SQL
+ * builders) remain in it. Helpers that take a `PDO` / `PDOStatement` still belong here.
  *
  * These are also the parts that are testable without a database.
  *
  * @phpstan-type BindingsMap array<string|int, mixed>
  * @phpstan-type DataMap array<string|int, mixed>
+ * @phpstan-type ExplainResult array{explain: list<array<string, mixed>>, warnings: list<array<string, mixed>>}
  */
 final class CommonModelPicoPdoUtils
 {
@@ -60,6 +63,78 @@ final class CommonModelPicoPdoUtils
      * sits near 200 rows, so below this the simpler single statement is kept.
      */
     public const int TEMP_UPDATE_MIN_ROWS = 200;
+
+    /**
+     * @param BindingsMap $params
+     */
+    public static function bindValues(PDOStatement $stmt, array $params): void
+    {
+        foreach ($params as $key => $value) {
+            $paramId = is_int($key) ? $key + 1 : ':' . ltrim($key, ':');
+            $stmt->bindValue($paramId, $value, match (true) {
+                is_int($value) => PDO::PARAM_INT,
+                is_bool($value) => PDO::PARAM_BOOL,
+                $value === null => PDO::PARAM_NULL,
+                default => PDO::PARAM_STR
+            });
+        }
+    }
+
+    /**
+     * @param mixed $message String, or JSON-encoded when not a string (explain rows, …)
+     */
+    public static function errorLogChunks(mixed $message): void
+    {
+        if (!(defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) || empty($message)) {
+            return;
+        }
+
+        $text = is_string($message) ? $message : (json_encode($message, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '');
+        array_map(error_log(...), str_split($text, 600));
+    }
+
+    /**
+     * Rewritten SQL is in SHOW WARNINGS after EXPLAIN EXTENDED; same connection, immediately.
+     *
+     * @param BindingsMap $params
+     * @return ExplainResult
+     */
+    public static function fetchExplainResult(PDO $pdo, string $sql, array $params): array
+    {
+        $empty = ['explain' => [], 'warnings' => []];
+        try {
+            $stmt = $pdo->prepare("EXPLAIN EXTENDED {$sql}");
+            if ($stmt === false) {
+                return $empty;
+            }
+            self::bindValues($stmt, $params);
+            if (!$stmt->execute()) {
+                return $empty;
+            }
+            $explain = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $warningsStmt = $pdo->query('SHOW WARNINGS');
+            $warnings = $warningsStmt !== false ? $warningsStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+
+            return ['explain' => $explain, 'warnings' => $warnings];
+        } catch (PDOException) {
+            return $empty;
+        }
+    }
+
+    /**
+     * @param PDOStatement|false $stmt
+     * @return string
+     */
+    public static function getPdoDebug(PDOStatement|false $stmt): string
+    {
+        if ($stmt === false) {
+            return 'Statement preparation failed';
+        }
+        ob_start();
+        $stmt->debugDumpParams();
+
+        return ob_get_clean() ?: '';
+    }
 
     /** Add LIMIT 1 unless the caller already supplied a LIMIT in the SQL tail. */
     public static function appendLimitOne(string|null $sqlTail): string

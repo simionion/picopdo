@@ -10,8 +10,6 @@ use PDOStatement;
 use RuntimeException;
 use Throwable;
 
-
-
 /**
  * Trait CommonModelPicoPdoTrait
  *
@@ -27,6 +25,7 @@ use Throwable;
  *
  * ## Features:
  * - Secure, parameterized queries via `prepExec()`, with array-expansion for `IN` clauses.
+ * - `debugNextStatement($callback)` — next `prepExec` (and CRUD helpers that use it) runs `EXPLAIN EXTENDED` then `SHOW WARNINGS`; `$callback` receives both. Omit `$callback` to `error_log` them in 600-char chunks.
  * - Simplified methods for SELECT, INSERT, UPDATE, DELETE, and EXISTS operations.
  * - Automatically binds parameters and handles execution errors.
  * - Reduces duplication and boilerplate in model implementations.
@@ -76,7 +75,8 @@ use Throwable;
  * Rows with different column sets are grouped and inserted in separate statements.
  *
  * ### `$where` (`WhereInput` — `string|array|null`)
- * Row filter. Omitted or empty on UPDATE/DELETE throws `InvalidArgumentException`, guarding full-table writes.
+ * Row filter. Nonempty UPDATE/DELETE operations require a nonempty WHERE or throw `InvalidArgumentException`.
+ * Empty UPDATE data and an empty DELETE condition list (`[]`) return 0 without executing SQL.
  *
  * **Shorthand** — column name + scalar `$bindings`:
  * ```
@@ -129,10 +129,16 @@ use Throwable;
  * @phpstan-type BindingsMap array<string|int, mixed>
  * @phpstan-type DataMap array<string|int, mixed>
  * @phpstan-type WhereInput string|array<string|int, mixed>|null
+ * @phpstan-import-type ExplainResult from CommonModelPicoPdoUtils
  */
 trait CommonModelPicoPdoTrait
 {
     protected PDO $pdo;
+
+    /**
+     * @var (callable(ExplainResult): mixed)|null
+     */
+    private mixed $onDebugCb = null;
 
     /**
      * The connection every trait method runs on: `$this->db`, else a legacy `$this->pdo`.
@@ -153,6 +159,30 @@ trait CommonModelPicoPdoTrait
         }
 
         throw new RuntimeException('No valid PDO connection found');
+    }
+
+    /**
+     * Run `EXPLAIN EXTENDED` then `SHOW WARNINGS` on the next {@see prepExec()} (including select/insert/update/delete).
+     *
+     * Consumed once. Replaced if called again before the next statement.
+     * `EXPLAIN EXTENDED` is plan-only (not `ANALYZE`); the real statement still runs after.
+     * Failures yield empty lists and do not abort the query.
+     *
+     * ```
+     * $this->debugNextStatement();
+     * $this->selectAll('users', '*', ['status' => 'active']);
+     *
+     * $this->debugNextStatement(function (array $result): void {
+     *     // $result['explain']: plan rows
+     *     // $result['warnings']: SHOW WARNINGS rows (Level, Code, Message)
+     * });
+     * ```
+     *
+     * @param callable|null $onDebugCb
+     */
+    protected function debugNextStatement(callable|null $onDebugCb = null): void
+    {
+        $this->onDebugCb = $onDebugCb ?? CommonModelPicoPdoUtils::errorLogChunks(...);
     }
 
     /**
@@ -188,43 +218,28 @@ trait CommonModelPicoPdoTrait
             [$sql, $params] = $this->buildInQuery($sql, $params);
         }
 
+        if ($this->onDebugCb) {
+            $onDebug = $this->onDebugCb;
+            $this->onDebugCb = null;
+            $onDebug(CommonModelPicoPdoUtils::fetchExplainResult($this->pdo(), $sql, $params));
+        }
+
         try {
             $stmt = $this->pdo()->prepare($sql);
-
-            foreach ($params as $key => $value) {
-                $paramId = is_int($key) ? $key + 1 : ':' . ltrim($key, ':');
-                $stmt->bindValue($paramId, $value, match (true) {
-                    is_int($value)  => PDO::PARAM_INT,
-                    is_bool($value) => PDO::PARAM_BOOL,
-                    $value === null      => PDO::PARAM_NULL,
-                    default              => PDO::PARAM_STR
-                });
+            if (!$stmt) {
+                throw new PDOException(implode(' ', $this->pdo()->errorInfo()));
             }
-
-            $stmt->execute();
+            CommonModelPicoPdoUtils::bindValues($stmt, $params);
+            if (!$stmt->execute()) {
+                throw new PDOException(implode(' ', $stmt->errorInfo()));
+            }
             return $stmt;
         } catch (PDOException $e) {
-            if (defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) {
-                array_map(error_log(...), str_split("<br><b>{$e->getMessage()}</b><br>{$this->getPdoDebug($stmt ?? false)}", 600));
-            }
+            CommonModelPicoPdoUtils::errorLogChunks(
+                "<br><b>{$e->getMessage()}</b><br>" . CommonModelPicoPdoUtils::getPdoDebug($stmt ?? false)
+            );
             throw $e;
         }
-    }
-
-
-    /**
-     * Get debug information from a PDO statement for error reporting.
-     *
-     * @param PDOStatement|false $stmt The PDO statement to debug, or false if preparation failed
-     * @return string Debug information as a string, or error message if statement is false
-     */
-    protected function getPdoDebug(PDOStatement|false $stmt): string {
-        if ($stmt === false) {
-            return 'Statement preparation failed';
-        }
-        ob_start();
-        $stmt->debugDumpParams();
-        return ob_get_clean() ?: '';
     }
 
     /**
@@ -327,7 +342,7 @@ trait CommonModelPicoPdoTrait
      * @param DataMap|list<DataMap> $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
      * @param array<string, mixed>|null $options Additional options for the insert operation
      * (e.g., ['mode' => 'REPLACE'] or ['mode' => 'INSERT IGNORE'] or ['onDuplicateKeyUpdate' => ['column' => 'value']])
-     * @return int|string|array<string, mixed> The ID of the inserted record, 0 if failed. For multi-statement batches, `id` is from the final INSERT statement. If 'meta' is true, returns ['id', 'rows', 'status' => 'noop|inserted|updated|affected']
+     * @return int|string|array{id:int|string,rows:int,status:string} The ID of the inserted record, 0 if failed. For multi-statement batches, `id` is from the final INSERT statement. If 'meta' is true, returns ['id', 'rows', 'status' => 'noop|inserted|updated|affected']
      * @throws PDOException
      */
     protected function insert(string $table, array $data, array|null $options = null): int|string|array
@@ -400,10 +415,10 @@ trait CommonModelPicoPdoTrait
     /**
      * This is a wrapper around {@see insert()} that performs a `REPLACE INTO`.
      * @param string $table Table name
-     * @param DataMap $data Key-value pairs of column names and values or raw sql queries like 'date = NOW()'
-     * @return int|string The ID of the inserted record, 0 if failed.
+     * @param DataMap|list<DataMap> $data Key-value pairs for one row or a list of rows
+     * @return int|string|array{id:int|string,rows:int,status:string} ID for one row, or batch metadata for multiple rows
      */
-    protected function insertReplace(string $table, array $data): int|string
+    protected function insertReplace(string $table, array $data): int|string|array
     {
         return $this->insert($table, $data, ['mode' => 'REPLACE']);
     }
@@ -517,7 +532,7 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $table Table name
-     * @param DataMap|list<DataMap> $data SET map, or list of SET maps when `$where` is also a list (batch)
+     * @param DataMap|list<DataMap> $data SET map or batch of SET maps; [] returns 0 without processing other arguments
      * @param WhereInput|list<DataMap|string> $where Column/condition (single), or list aligned with `$data` (batch)
      * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings Per-row list when batch `$where` uses `?` / named placeholders
      * @param string|null $sqlTail Extra query suffix (e.g. ORDER BY, LIMIT)
@@ -527,7 +542,7 @@ trait CommonModelPicoPdoTrait
     protected function update(string $table, array $data, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
         if ($data === []) {
-            throw new InvalidArgumentException('UPDATE data cannot be empty');
+            return 0;
         }
 
         if (CommonModelPicoPdoUtils::isRowSet($data)) {
@@ -890,7 +905,7 @@ trait CommonModelPicoPdoTrait
      * ```
      *
      * @param string $table Table name
-     * @param string|DataMap|list<DataMap|string> $where Column/condition (single), assoc map, or list of maps/conditions (batch)
+     * @param string|DataMap|list<DataMap|string> $where Single condition or batch; [] means zero conditions and returns 0
      * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings Value / map for single; per-row list when batch
      * @param string|null $sqlTail Extra query suffix (e.g. ORDER BY, LIMIT)
      * @return int Number of affected rows
@@ -898,6 +913,10 @@ trait CommonModelPicoPdoTrait
      */
     protected function delete(string $table, string|array $where, int|string|array|null $bindings = null, string|null $sqlTail = null): int
     {
+        if ($where === []) {
+            return 0;
+        }
+
         if (CommonModelPicoPdoUtils::isRowSet($where)) {
             $where = array_values($where);
             foreach ($where as $condition) {

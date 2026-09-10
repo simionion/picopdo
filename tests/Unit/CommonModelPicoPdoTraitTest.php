@@ -29,7 +29,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
         buildInQuery as public _testBuildInQuery;
         buildSqlClause as public _testBuildSqlClause;
         convertToNamedPlaceholders as public _testConvertToNamedPlaceholders;
-        getPdoDebug as public _testGetPdoDebug;
     }
 
     protected PDO $pdo;
@@ -176,13 +175,13 @@ class CommonModelPicoPdoTraitTest extends TestCase
 
     public function testGetPdoDebugWithFalseStatement(): void
     {
-        $this->assertSame('Statement preparation failed', $this->_testGetPdoDebug(false));
+        $this->assertSame('Statement preparation failed', CommonModelPicoPdoUtils::getPdoDebug(false));
     }
 
     public function testGetPdoDebugWithRealStatement(): void
     {
         $stmt = $this->pdo->query('SELECT 1 AS x');
-        $this->assertIsString($this->_testGetPdoDebug($stmt));
+        $this->assertStringContainsString('SELECT 1 AS x', CommonModelPicoPdoUtils::getPdoDebug($stmt));
     }
 
     // ——— buildInQuery ———
@@ -1572,7 +1571,7 @@ class CommonModelPicoPdoTraitTest extends TestCase
         $host->resolvePdo();
     }
 
-    public function testUpdateRejectsEmptyDataAndInvalidBatchShapes(): void
+    public function testUpdateAcceptsEmptyDataAndRejectsInvalidBatchShapes(): void
     {
         $host = new class ($this->pdo) {
             use CommonModelPicoPdoTrait {
@@ -1585,12 +1584,7 @@ class CommonModelPicoPdoTraitTest extends TestCase
             }
         };
 
-        try {
-            $host->update(self::TABLE_USERS, [], 'id', 1);
-            $this->fail('Expected empty data exception');
-        } catch (\InvalidArgumentException $e) {
-            $this->assertStringContainsString('UPDATE data cannot be empty', $e->getMessage());
-        }
+        $this->assertSame(0, $host->update(self::TABLE_USERS, [], 'id', 1));
 
         try {
             $host->update(self::TABLE_USERS, [['name' => 'A']], ['id' => 1]);
