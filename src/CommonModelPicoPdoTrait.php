@@ -10,6 +10,7 @@ use PDOStatement;
 use RuntimeException;
 use Throwable;
 
+
 /**
  * Trait CommonModelPicoPdoTrait
  *

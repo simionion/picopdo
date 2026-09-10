@@ -21,6 +21,10 @@ The library retains its own namespace and imports. The Lodur-only methods `getTa
 `removeInvalidColumns()` and `validateLanguageColumn()` are intentionally excluded: their schema,
 cache and language dependencies belong to the application.
 
+Keep the shared source identical to Lodur, including comments and whitespace. Only the
+namespace/import block and the three excluded methods may differ. Fixes discovered by this
+repository's tests must also be imported back into the active Lodur checkout.
+
 ## Requirements
 
 - PHP 8.3 or higher

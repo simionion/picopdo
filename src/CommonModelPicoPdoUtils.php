@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace Lodur\PicoPdo;
@@ -85,6 +86,7 @@ final class CommonModelPicoPdoUtils
      */
     public static function errorLogChunks(mixed $message): void
     {
+        // @phpstan-ignore booleanAnd.rightAlwaysTrue (bootstrap_lite defines LODUR_TEST_SERVER as 0 on Live)
         if (!(defined('LODUR_TEST_SERVER') && LODUR_TEST_SERVER) || empty($message)) {
             return;
         }
