@@ -551,8 +551,11 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertSame(['id' => 0, 'rows' => 0, 'status' => 'noop'], $this->trait->insertReplace('test_users', [[]]));
     }
 
-    public function testDebugNextStatementReportsPlanForExpandedInAndTypedLimit(): void
+    #[DataProvider('pdoErrorModes')]
+    public function testDebugNextStatementReportsPlanForExpandedInAndTypedLimit(int $errorMode, bool $emulated): void
     {
+        $this->pdo->setAttribute(PDO::ATTR_ERRMODE, $errorMode);
+        $this->pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, $emulated);
         $this->trait->insert('test_users', [
             ['id' => 1, 'name' => 'A', 'email' => 'a@example.com'],
             ['id' => 2, 'name' => 'B', 'email' => 'b@example.com'],
@@ -572,21 +575,33 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         $this->assertNotEmpty($results[0]['explain']);
         $this->assertContains('test_users', array_column($results[0]['explain'], 'table'));
         $this->assertContains(1003, array_column($results[0]['warnings'], 'Code'));
+        $this->assertSame($errorMode, $this->pdo->getAttribute(PDO::ATTR_ERRMODE));
+        $this->assertSame($emulated, (bool)$this->pdo->getAttribute(PDO::ATTR_EMULATE_PREPARES));
     }
 
     #[DataProvider('pdoErrorModes')]
-    public function testUnsupportedExplainDoesNotAbortValidSql(int $errorMode, bool $emulated): void
+    public function testUnsupportedExplainThrowsBeforeValidSqlAndConsumesTheCallback(int $errorMode, bool $emulated): void
     {
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, $errorMode);
         $this->pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, $emulated);
+        $this->trait->prepExec('SET @pico_debug_probe = ?', [7]);
         $results = [];
         $this->trait->debugNextStatement(static function (array $result) use (&$results): void {
             $results[] = $result;
         });
+        try {
+            $this->trait->prepExec('SET @pico_debug_probe = ?', [42]);
+            $this->fail('An unsupported EXPLAIN must fail before executing the valid SET statement');
+        } catch (PDOException $error) {
+            $this->assertNotSame('', $error->getMessage());
+        }
+        $this->assertSame(7, (int)$this->pdo->query('SELECT @pico_debug_probe')->fetchColumn());
+        $this->assertSame([], $results);
+        $this->assertSame($errorMode, $this->pdo->getAttribute(PDO::ATTR_ERRMODE));
+        $this->assertSame($emulated, (bool)$this->pdo->getAttribute(PDO::ATTR_EMULATE_PREPARES));
         $this->trait->prepExec('SET @pico_debug_probe = ?', [42]);
         $this->assertSame(42, (int)$this->pdo->query('SELECT @pico_debug_probe')->fetchColumn());
-        $this->assertSame([['explain' => [], 'warnings' => []]], $results);
-        $this->assertSame($errorMode, $this->pdo->getAttribute(PDO::ATTR_ERRMODE));
+        $this->assertSame([], $results, 'The failed diagnostic consumed the callback before retrying');
     }
 
     #[DataProvider('pdoErrorModes')]
@@ -600,14 +615,14 @@ class CommonModelPicoPdoTraitIntegrationTest extends TestCase
         });
         try {
             $this->trait->prepExec('SELECT * FROM pico_missing_diagnostics_table');
-            $this->fail('Real SQL failures must propagate even when diagnostics are optional');
+            $this->fail('SQL failures must propagate when diagnostics are requested');
         } catch (PDOException $error) {
             $this->assertStringContainsString('pico_missing_diagnostics_table', $error->getMessage());
-            $this->assertSame([['explain' => [], 'warnings' => []]], $results);
+            $this->assertSame([], $results);
         }
         $this->assertSame($errorMode, $this->pdo->getAttribute(PDO::ATTR_ERRMODE));
         $this->assertSame(1, (int)$this->trait->prepExec('SELECT 1')->fetchColumn());
-        $this->assertCount(1, $results, 'A failed real statement still consumes its one-shot diagnostic');
+        $this->assertSame([], $results, 'A failed diagnostic still consumes its one-shot callback');
     }
 
     public static function pdoErrorModes(): iterable

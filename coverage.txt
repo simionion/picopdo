@@ -1,14 +1,14 @@
 
 
 Code Coverage Report:
-  2026-09-10 07:23:56
+  2026-09-10 08:59:36
 
  Summary:
   Classes: 100.00% (2/2)
-  Methods: 100.00% (49/49)
-  Lines:   100.00% (670/670)
+  Methods: 100.00% (48/48)
+  Lines:   100.00% (660/660)
 
 Lodur\PicoPdo\CommonModelPicoPdoTrait
-  Methods: 100.00% (23/23)   Lines: 100.00% (420/420)
+  Methods: 100.00% (23/23)   Lines: 100.00% (423/423)
 Lodur\PicoPdo\CommonModelPicoPdoUtils
-  Methods: 100.00% (26/26)   Lines: 100.00% (250/250)
+  Methods: 100.00% (25/25)   Lines: 100.00% (237/237)

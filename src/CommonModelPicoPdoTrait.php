@@ -166,8 +166,8 @@ trait CommonModelPicoPdoTrait
      * Run `EXPLAIN EXTENDED` then `SHOW WARNINGS` on the next {@see prepExec()} (including select/insert/update/delete).
      *
      * Consumed once. Replaced if called again before the next statement.
-     * `EXPLAIN EXTENDED` is plan-only (not `ANALYZE`); the real statement still runs after.
-     * Failures yield empty lists and do not abort the query.
+     * `EXPLAIN EXTENDED` is plan-only (not `ANALYZE`); the real statement runs after successful diagnostics.
+     * Diagnostic SQL failures propagate PDOException and prevent the real statement from running.
      *
      * ```
      * $this->debugNextStatement();
@@ -209,7 +209,7 @@ trait CommonModelPicoPdoTrait
      * @param string $sql The SQL query.
      * @param BindingsMap|string|int|null $params
      * @return PDOStatement The executed statement.
-     * @throws PDOException If the query fails to execute.
+     * @throws PDOException If the requested diagnostics or the real query fail to execute.
      */
     protected function prepExec(string $sql, array|string|int|null $params = null): PDOStatement
     {
@@ -222,7 +222,11 @@ trait CommonModelPicoPdoTrait
         if ($this->onDebugCb) {
             $onDebug = $this->onDebugCb;
             $this->onDebugCb = null;
-            $onDebug(CommonModelPicoPdoUtils::fetchExplainResult($this->pdo(), $sql, $params));
+            // Same connection, immediately after EXPLAIN; the consumed callback prevents recursion.
+            $onDebug([
+                'explain' => $this->prepExec("EXPLAIN EXTENDED {$sql}", $params)->fetchAll(PDO::FETCH_ASSOC),
+                'warnings' => $this->prepExec('SHOW WARNINGS')->fetchAll(PDO::FETCH_ASSOC),
+            ]);
         }
 
         try {

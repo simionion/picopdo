@@ -265,11 +265,18 @@ $model->selectAll('users', ['id', 'name'], ['id IN (?)' => [1, 2]]);
 ```
 
 The callback runs once, before the next statement, after `EXPLAIN EXTENDED` and `SHOW WARNINGS`
-on the same connection. An unavailable EXPLAIN yields empty diagnostics; unavailable SHOW WARNINGS can yield an empty
-warnings list. Optional diagnostic SQL failures allow the actual statement to proceed. Registering another callback replaces the pending one.
+on the same connection. Both diagnostic queries use `prepExec()` for bindings and execution.
+A preparation/execution failure in either query propagates `PDOException` and prevents the actual
+statement from running, in both SILENT and EXCEPTION modes. The pending callback is consumed before
+these queries run, preventing recursive diagnostics even after a failure. Registering another callback
+replaces the pending one. Only enable diagnostics for SQL supported by EXPLAIN: a valid statement such
+as `SET` can fail at EXPLAIN before it executes.
 Without a callback, logging uses the existing optional `LODUR_TEST_SERVER` flag; define it as true
 to enable chunked `error_log` output. A callback works without that flag or any Lodur bootstrap.
 The former trait helper `getPdoDebug()` now lives at `CommonModelPicoPdoUtils::getPdoDebug()`.
+The diagnostic queries run directly in `prepExec()`'s debug block; request them through
+`debugNextStatement()`. Diagnostic failures use the same logging path as other `prepExec()` failures.
+Diagnostic and callback exceptions propagate without a separate diagnostic catch.
 
 ### EXISTS
 
@@ -731,9 +738,9 @@ Each documented code example in the trait PHPDoc and this README has a matching 
 Test names for doc examples are prefixed with `testDoc`.
 
 Verified on PHP 8.3.32 / PHPUnit 10.5.64 / MariaDB 10.6:
-- **329 tests** (181 unit, 148 integration), **63,048 assertions**, no failures/errors/skips with Xdebug off.
-- **100%** lines (670/670) and methods (49/49) across both source files with Xdebug coverage.
-- Coverage run: 329 tests and 63,032 assertions. Timing assertions are disabled under coverage;
+- **340 tests** (189 unit, 151 integration), **63,160 assertions**, no failures/errors/skips with Xdebug off.
+- **100%** lines (660/660) and methods (48/48) across both source files with Xdebug coverage.
+- Coverage run: 340 tests and 63,144 assertions. Timing assertions are disabled under coverage;
   the complete timing checks passed separately with `XDEBUG_MODE=off`.
 - Updated tests cover typed bindings, one-shot diagnostics, PDO SILENT/EXCEPTION behavior,
   scalar/batch REPLACE metadata and empty-write collections. The tracked `coverage.txt` and

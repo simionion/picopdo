@@ -6,7 +6,6 @@ namespace Lodur\PicoPdo;
 
 use InvalidArgumentException;
 use PDO;
-use PDOException;
 use PDOStatement;
 
 /**
@@ -93,34 +92,6 @@ final class CommonModelPicoPdoUtils
 
         $text = is_string($message) ? $message : (json_encode($message, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '');
         array_map(error_log(...), str_split($text, 600));
-    }
-
-    /**
-     * Rewritten SQL is in SHOW WARNINGS after EXPLAIN EXTENDED; same connection, immediately.
-     *
-     * @param BindingsMap $params
-     * @return ExplainResult
-     */
-    public static function fetchExplainResult(PDO $pdo, string $sql, array $params): array
-    {
-        $empty = ['explain' => [], 'warnings' => []];
-        try {
-            $stmt = $pdo->prepare("EXPLAIN EXTENDED {$sql}");
-            if ($stmt === false) {
-                return $empty;
-            }
-            self::bindValues($stmt, $params);
-            if (!$stmt->execute()) {
-                return $empty;
-            }
-            $explain = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            $warningsStmt = $pdo->query('SHOW WARNINGS');
-            $warnings = $warningsStmt !== false ? $warningsStmt->fetchAll(PDO::FETCH_ASSOC) : [];
-
-            return ['explain' => $explain, 'warnings' => $warnings];
-        } catch (PDOException) {
-            return $empty;
-        }
     }
 
     /**

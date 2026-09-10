@@ -18,66 +18,142 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
     private const EMPTY_RESULT = ['explain' => [], 'warnings' => []];
 
     #[DataProvider('diagnosticFailures')]
-    public function testOptionalDiagnosticFailureDoesNotPreventTheRealStatement(string $stage, bool $throws): void
-    {
-        $explainRows = [['id' => 1, 'select_type' => 'SIMPLE']];
-        $diagnostic = $this->createMock(PDOStatement::class);
-        if ($stage === 'execute') {
-            if ($throws) {
-                $diagnostic->method('execute')->willThrowException(new PDOException('EXPLAIN execution failed'));
+    public function testDiagnosticFailuresPropagateBeforeTheRealStatementAndConsumeTheCallback(
+        string $failedSql,
+        string $stage,
+        bool $throws
+    ): void {
+        $original = new PDOException('Diagnostic ' . $stage . ' failed');
+        $statements = [];
+        foreach (['EXPLAIN EXTENDED SELECT 1', 'SHOW WARNINGS'] as $sql) {
+            $statement = $this->createMock(PDOStatement::class);
+            if ($sql === $failedSql && $stage === 'execute') {
+                $execute = $statement->expects($this->once())->method('execute');
+                if ($throws) {
+                    $execute->willThrowException($original);
+                } else {
+                    $execute->willReturn(false);
+                    $statement->method('errorInfo')->willReturn(['HY000', 1, 'Diagnostic execution failed']);
+                }
+                $statement->expects($this->never())->method('fetchAll');
             } else {
-                $diagnostic->method('execute')->willReturn(false);
+                $statement->method('execute')->willReturn(true);
+                $statement->method('fetchAll')->willReturn([['id' => 1]]);
             }
-            $diagnostic->expects($this->never())->method('fetchAll');
-        } else {
-            $diagnostic->method('execute')->willReturn(true);
-            $diagnostic->method('fetchAll')->willReturn($explainRows);
+            $statements[$sql] = $statement;
         }
         $actual = $this->successfulStatement();
         $pdo = $this->createMock(PDO::class);
-        $pdo->expects($this->exactly(2))->method('prepare')
-            ->willReturnCallback(static function (string $sql) use ($stage, $throws, $diagnostic, $actual): PDOStatement|false {
-                if ($sql === 'EXPLAIN EXTENDED SELECT 1') {
-                    if ($stage === 'prepare') {
-                        if ($throws) {
-                            throw new PDOException('EXPLAIN preparation failed');
-                        }
-                        return false;
+        $pdo->expects($this->never())->method('query');
+        $pdo->expects($this->never())->method('setAttribute');
+        $pdo->method('errorInfo')->willReturn(['HY000', 1, 'Diagnostic preparation failed']);
+        $prepared = [];
+        $pdo->method('prepare')->willReturnCallback(
+            static function (string $sql) use ($failedSql, $stage, $throws, $statements, $actual, $original, &$prepared): PDOStatement|false {
+                $prepared[] = $sql;
+                if ($sql === $failedSql && $stage === 'prepare') {
+                    if ($throws) {
+                        throw $original;
                     }
-                    return $diagnostic;
+                    return false;
                 }
-                TestCase::assertSame('SELECT 1', $sql);
-                return $actual;
-            });
-        if ($stage === 'warnings') {
-            $query = $pdo->expects($this->once())->method('query')->with('SHOW WARNINGS');
-            if ($throws) {
-                $query->willThrowException(new PDOException('SHOW WARNINGS failed'));
-            } else {
-                $query->willReturn(false);
+                return in_array($sql, ['SELECT 1', 'SELECT 2'], true) ? $actual : $statements[$sql];
             }
-        } else {
-            $pdo->expects($this->never())->method('query');
-        }
+        );
 
         $host = $this->host($pdo);
         $results = [];
         $host->debugNextStatement(static function (array $result) use (&$results): void {
             $results[] = $result;
         });
-        $this->assertSame($actual, $host->prepExec('SELECT 1'));
-        $expected = $stage === 'warnings' && !$throws
-            ? ['explain' => $explainRows, 'warnings' => []]
-            : self::EMPTY_RESULT;
-        $this->assertSame([$expected], $results);
+        try {
+            $host->prepExec('SELECT 1');
+            $this->fail('Diagnostic failures must propagate before the real statement runs');
+        } catch (PDOException $error) {
+            $this->assertStringContainsString('Diagnostic', $error->getMessage());
+            if ($throws) {
+                $this->assertSame($original, $error);
+            }
+        }
+        $this->assertSame([], $results, 'A failed diagnostic must not invoke the callback');
+        $this->assertSame(
+            $failedSql === 'SHOW WARNINGS'
+                ? ['EXPLAIN EXTENDED SELECT 1', 'SHOW WARNINGS']
+                : ['EXPLAIN EXTENDED SELECT 1'],
+            $prepared
+        );
+        $this->assertSame($actual, $host->prepExec('SELECT 2'));
+        $this->assertSame('SELECT 2', $prepared[array_key_last($prepared)]);
+        $this->assertSame([], $results, 'A failed diagnostic still consumes its one-shot callback');
     }
 
     public static function diagnosticFailures(): iterable
     {
-        foreach (['prepare', 'execute', 'warnings'] as $stage) {
-            yield "$stage returns false" => [$stage, false];
-            yield "$stage throws PDOException" => [$stage, true];
+        foreach (['EXPLAIN EXTENDED SELECT 1', 'SHOW WARNINGS'] as $sql) {
+            foreach (['prepare', 'execute'] as $stage) {
+                yield "$sql $stage returns false" => [$sql, $stage, false];
+                yield "$sql $stage throws PDOException" => [$sql, $stage, true];
+            }
         }
+    }
+
+    public function testDiagnosticsUsePrepExecWithTheSameExpandedTypedBindingsAsTheRealQuery(): void
+    {
+        $sql = 'SELECT id FROM users WHERE id IN (:ids) AND active = :active'
+            . ' AND deleted_at <=> :deleted AND name = :name LIMIT ?';
+        $params = ['ids' => [7, 11], 'active' => true, 'deleted' => null, 'name' => 'A', 2];
+        $expandedSql = 'SELECT id FROM users WHERE id IN (:ids0,:ids1) AND active = :active'
+            . ' AND deleted_at <=> :deleted AND name = :name LIMIT :nph_0';
+        $explain = $this->successfulStatement();
+        $actual = $this->successfulStatement();
+        $warnings = $this->successfulStatement();
+        $plan = [['id' => 1, 'table' => 'users']];
+        $warningRows = [['Level' => 'Note', 'Code' => 1003, 'Message' => 'rewritten query']];
+        $explain->expects($this->once())->method('fetchAll')->with(PDO::FETCH_ASSOC)->willReturn($plan);
+        $warnings->expects($this->once())->method('fetchAll')->with(PDO::FETCH_ASSOC)->willReturn($warningRows);
+        $warnings->expects($this->never())->method('bindValue');
+        $bindings = [];
+        foreach (['explain' => $explain, 'actual' => $actual] as $name => $statement) {
+            $statement->expects($this->exactly(6))->method('bindValue')->willReturnCallback(
+                static function (string $key, mixed $value, int $type) use ($name, &$bindings): bool {
+                    $bindings[$name][$key] = [$value, $type];
+                    return true;
+                }
+            );
+        }
+        $pdo = $this->createMock(PDO::class);
+        $pdo->expects($this->never())->method('query');
+        $prepared = [];
+        $pdo->expects($this->exactly(3))->method('prepare')->willReturnCallback(
+            static function (string $query) use ($expandedSql, $explain, $warnings, $actual, &$prepared): PDOStatement {
+                $prepared[] = $query;
+                return match ($query) {
+                    "EXPLAIN EXTENDED {$expandedSql}" => $explain,
+                    'SHOW WARNINGS' => $warnings,
+                    $expandedSql => $actual,
+                };
+            }
+        );
+        $host = $this->host($pdo);
+        $results = [];
+        $host->debugNextStatement(static function (array $result) use (&$results): void {
+            $results[] = $result;
+        });
+
+        $this->assertSame($actual, $host->prepExec($sql, $params));
+        $this->assertSame([['explain' => $plan, 'warnings' => $warningRows]], $results);
+        $this->assertSame(["EXPLAIN EXTENDED {$expandedSql}", 'SHOW WARNINGS', $expandedSql], $prepared);
+        $this->assertSame([$sql, "EXPLAIN EXTENDED {$expandedSql}", 'SHOW WARNINGS'], $host->executionCalls);
+        $expectedBindings = [
+            ':ids0' => [7, PDO::PARAM_INT],
+            ':ids1' => [11, PDO::PARAM_INT],
+            ':active' => [true, PDO::PARAM_BOOL],
+            ':deleted' => [null, PDO::PARAM_NULL],
+            ':name' => ['A', PDO::PARAM_STR],
+            ':nph_0' => [2, PDO::PARAM_INT],
+        ];
+        $this->assertSame($expectedBindings, $bindings['explain']);
+        $this->assertSame($expectedBindings, $bindings['actual']);
     }
 
     #[DataProvider('statementFailures')]
@@ -116,6 +192,58 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
         }
     }
 
+    #[DataProvider('statementFailures')]
+    public function testRealStatementFailuresPropagateAfterSuccessfulDiagnostics(string $stage, bool $throws): void
+    {
+        $original = new PDOException('Real statement failed');
+        $diagnostic = $this->successfulStatement();
+        $diagnostic->method('fetchAll')->willReturn([]);
+        $actual = $this->createMock(PDOStatement::class);
+        if ($stage === 'execute') {
+            $execute = $actual->expects($this->once())->method('execute');
+            if ($throws) {
+                $execute->willThrowException($original);
+            } else {
+                $execute->willReturn(false);
+                $actual->method('errorInfo')->willReturn(['HY000', 1, 'Real statement failed']);
+            }
+        }
+        $pdo = $this->createMock(PDO::class);
+        $pdo->method('errorInfo')->willReturn(['HY000', 1, 'Real statement failed']);
+        $prepared = [];
+        $pdo->expects($this->exactly(3))->method('prepare')->willReturnCallback(
+            static function (string $sql) use ($stage, $throws, $original, $diagnostic, $actual, &$prepared): PDOStatement|false {
+                $prepared[] = $sql;
+                if ($sql !== 'SELECT 1') {
+                    return $diagnostic;
+                }
+                if ($stage === 'prepare') {
+                    if ($throws) {
+                        throw $original;
+                    }
+                    return false;
+                }
+                return $actual;
+            }
+        );
+        $host = $this->host($pdo);
+        $results = [];
+        $host->debugNextStatement(static function (array $result) use (&$results): void {
+            $results[] = $result;
+        });
+        try {
+            $host->prepExec('SELECT 1');
+            $this->fail('The real SQL failure must propagate after successful diagnostics');
+        } catch (PDOException $error) {
+            $this->assertStringContainsString('Real statement failed', $error->getMessage());
+            if ($throws) {
+                $this->assertSame($original, $error);
+            }
+        }
+        $this->assertSame([self::EMPTY_RESULT], $results);
+        $this->assertSame(['EXPLAIN EXTENDED SELECT 1', 'SHOW WARNINGS', 'SELECT 1'], $prepared);
+    }
+
     public static function statementFailures(): iterable
     {
         foreach (['prepare', 'execute'] as $stage) {
@@ -131,7 +259,7 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
         $sqlLog = [];
         $pdo->method('prepare')->willReturnCallback(static function (string $sql) use (&$sqlLog, $statement): PDOStatement|false {
             $sqlLog[] = $sql;
-            return str_starts_with($sql, 'EXPLAIN ') ? false : $statement;
+            return $statement;
         });
         $host = $this->host($pdo);
         $calls = [];
@@ -147,15 +275,14 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
         $host->prepExec('SELECT 3');
 
         $this->assertSame([self::EMPTY_RESULT], $calls);
-        $this->assertSame(['EXPLAIN EXTENDED SELECT 1', 'SELECT 2', 'SELECT 1', 'SELECT 3'], $sqlLog);
+        $this->assertSame(['EXPLAIN EXTENDED SELECT 1', 'SHOW WARNINGS', 'SELECT 2', 'SELECT 1', 'SELECT 3'], $sqlLog);
     }
 
     public function testDebugCallbackCanArmTheFollowingStatement(): void
     {
         $statement = $this->successfulStatement();
         $pdo = $this->createMock(PDO::class);
-        $pdo->expects($this->exactly(5))->method('prepare')
-            ->willReturnCallback(static fn (string $sql): PDOStatement|false => str_starts_with($sql, 'EXPLAIN ') ? false : $statement);
+        $pdo->expects($this->exactly(7))->method('prepare')->willReturn($statement);
         $host = $this->host($pdo);
         $calls = [];
         $host->debugNextStatement(static function () use (&$calls, $host): void {
@@ -169,6 +296,37 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
         $host->prepExec('SELECT 2');
         $host->prepExec('SELECT 3');
         $this->assertSame(['first', 'second'], $calls);
+    }
+
+    public function testDebugCallbackPdoExceptionPropagatesAndTheCallbackRemainsConsumed(): void
+    {
+        $statement = $this->successfulStatement();
+        $statement->method('fetchAll')->willReturn([]);
+        $pdo = $this->createMock(PDO::class);
+        $prepared = [];
+        $pdo->expects($this->exactly(3))->method('prepare')->willReturnCallback(
+            static function (string $sql) use ($statement, &$prepared): PDOStatement {
+                $prepared[] = $sql;
+                return $statement;
+            }
+        );
+        $host = $this->host($pdo);
+        $original = new PDOException('Debug callback failure');
+        $calls = 0;
+        $host->debugNextStatement(static function () use ($original, &$calls): void {
+            ++$calls;
+            throw $original;
+        });
+
+        try {
+            $host->prepExec('SELECT 1');
+            $this->fail('Callback failures must propagate');
+        } catch (PDOException $error) {
+            $this->assertSame($original, $error);
+        }
+        $this->assertSame($statement, $host->prepExec('SELECT 2'));
+        $this->assertSame(1, $calls);
+        $this->assertSame(['EXPLAIN EXTENDED SELECT 1', 'SHOW WARNINGS', 'SELECT 2'], $prepared);
     }
 
     public function testEmptyWritesNeedNoConnectionAndPreserveThePendingDebugCallback(): void
@@ -188,7 +346,7 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
 
         $statement = $this->successfulStatement();
         $pdo = $this->createMock(PDO::class);
-        $pdo->expects($this->exactly(2))->method('prepare')->willReturn(false, $statement);
+        $pdo->expects($this->exactly(3))->method('prepare')->willReturn($statement);
         $host->connect($pdo);
         $this->assertSame($statement, $host->prepExec('SELECT 1'));
         $this->assertSame([self::EMPTY_RESULT], $calls);
@@ -234,7 +392,7 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
             $this->assertSame(0, $host->connectionRequests);
         }
         $pdo = $this->createMock(PDO::class);
-        $pdo->expects($this->exactly(2))->method('prepare')->willReturn(false, $this->successfulStatement());
+        $pdo->expects($this->exactly(3))->method('prepare')->willReturn($this->successfulStatement());
         $host->connect($pdo);
         $host->prepExec('SELECT 1');
         $this->assertSame([self::EMPTY_RESULT], $calls);
@@ -252,13 +410,14 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
         return new class ($pdo) {
             use CommonModelPicoPdoTrait {
                 debugNextStatement as public;
-                prepExec as public;
+                prepExec as private traitPrepExec;
                 update as public;
                 delete as public;
                 pdo as private traitPdo;
             }
 
             public int $connectionRequests = 0;
+            public array $executionCalls = [];
 
             public function __construct(?PDO $pdo)
             {
@@ -270,6 +429,12 @@ class CommonModelPicoPdoDiagnosticsTest extends TestCase
             public function connect(PDO $pdo): void
             {
                 $this->pdo = $pdo;
+            }
+
+            public function prepExec(string $sql, array|string|int|null $params = null): PDOStatement
+            {
+                $this->executionCalls[] = $sql;
+                return $this->traitPrepExec($sql, $params);
             }
 
             protected function pdo(): PDO
