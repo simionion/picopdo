@@ -21,7 +21,8 @@ use Throwable;
  *
  * ## Usage:
  * - Intended to be included in models that require direct database interaction.
- * - Requires a `$db` property of type PDO to be defined in the consuming class. Legacy models using `$pdo` remain supported through {@see pdo()}.
+ * - Uses the first initialized property containing a PDO instance (e.g. `$db`, `$pdo`, or `$mysqlDb`).
+ *   {@see pdo()} throws a {@see RuntimeException} if no PDO property is found.
  * - Provides protected helper methods for common database tasks.
  *
  * ## Features:
@@ -142,20 +143,23 @@ trait CommonModelPicoPdoTrait
     private mixed $onDebugCb = null;
 
     /**
-     * The connection every trait method runs on: `$this->db`, else a legacy `$this->pdo`.
+     * The connection every trait method runs on: the first initialized property holding a PDO instance.
      *
+     * The property name is found once per class and remembered for further calls.
      * Protected so a class holding its handle elsewhere can override it.
      */
     protected function pdo(): PDO
     {
-        if (isset($this->pdo)) {
-            return $this->pdo;
+        static $prop = null;
+
+        if ($prop !== null && ($this->{$prop} ?? null) instanceof PDO) {
+            return $this->{$prop};
         }
 
-        $vars = get_object_vars($this);
-        foreach (['db', 'oDB'] as $property) {
-            if (($vars[$property] ?? null) instanceof PDO) {
-                return $vars[$property];
+        foreach (get_object_vars($this) as $name => $value) {
+            if ($value instanceof PDO) {
+                $prop = $name;
+                return $value;
             }
         }
 
