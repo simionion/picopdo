@@ -7,6 +7,8 @@ namespace Lodur\PicoPdo;
 use InvalidArgumentException;
 use PDO;
 use PDOStatement;
+use RuntimeException;
+use Throwable;
 
 /**
  * Stateless helpers for {@see CommonModelPicoPdoTrait}.
@@ -63,6 +65,98 @@ final class CommonModelPicoPdoUtils
      * sits near 200 rows, so below this the simpler single statement is kept.
      */
     public const int TEMP_UPDATE_MIN_ROWS = 200;
+
+    /**
+     * Run one atomic unit, owning a transaction or using a savepoint inside its caller's transaction.
+     *
+     * @template T
+     * @param callable():T $work
+     * @param (callable(T):bool)|null $isRejected Rolls back a business rejection while returning its result.
+     * @return T
+     */
+    public static function transaction(PDO $pdo, callable $work, callable|null $isRejected = null): mixed
+    {
+        static $savepointPrefix = null;
+        static $savepointSequence = 0;
+
+        $savepointPrefix ??= 'rr_' . bin2hex(random_bytes(8)) . '_';
+        $savepoint = $pdo->inTransaction() ? $savepointPrefix . ++$savepointSequence : null;
+        self::openTransaction($pdo, $savepoint);
+
+        try {
+            $result = $work();
+            $isRejectedResult = $isRejected !== null && $isRejected($result);
+        } catch (Throwable $failure) {
+            self::undoAfterTransactionFailure($pdo, $savepoint, $failure);
+            throw $failure;
+        }
+
+        if ($isRejectedResult) {
+            self::undoTransaction($pdo, $savepoint);
+            return $result;
+        }
+
+        try {
+            self::closeTransaction($pdo, $savepoint);
+        } catch (Throwable $failure) {
+            self::undoAfterTransactionFailure($pdo, $savepoint, $failure);
+            throw $failure;
+        }
+
+        return $result;
+    }
+
+    private static function openTransaction(PDO $pdo, string|null $savepoint): void
+    {
+        $isOpen = $savepoint === null
+            ? $pdo->beginTransaction()
+            : self::executeSavepoint($pdo, 'SAVEPOINT', $savepoint);
+        if (!$isOpen) {
+            throw new RuntimeException('Transaction unit could not be opened');
+        }
+    }
+
+    private static function closeTransaction(PDO $pdo, string|null $savepoint): void
+    {
+        $isClosed = $savepoint === null
+            ? $pdo->commit()
+            : self::executeSavepoint($pdo, 'RELEASE SAVEPOINT', $savepoint);
+        if (!$isClosed) {
+            throw new RuntimeException('Transaction unit could not be committed');
+        }
+    }
+
+    private static function undoTransaction(PDO $pdo, string|null $savepoint): void
+    {
+        if ($savepoint === null) {
+            $isUndone = !$pdo->inTransaction() || $pdo->rollBack();
+        } else {
+            $isUndone = self::executeSavepoint($pdo, 'ROLLBACK TO SAVEPOINT', $savepoint)
+                && self::executeSavepoint($pdo, 'RELEASE SAVEPOINT', $savepoint);
+        }
+        if (!$isUndone) {
+            throw new RuntimeException('Transaction unit could not be rolled back');
+        }
+    }
+
+    private static function undoAfterTransactionFailure(PDO $pdo, string|null $savepoint, Throwable $failure): void
+    {
+        try {
+            self::undoTransaction($pdo, $savepoint);
+        } catch (Throwable $undoFailure) {
+            throw new RuntimeException($undoFailure->getMessage(), 0, $failure);
+        }
+    }
+
+    /** Savepoint identifiers are generated here, but still validated before interpolation. */
+    private static function executeSavepoint(PDO $pdo, string $statement, string $name): bool
+    {
+        if (preg_match('/^[a-z][a-z0-9_]{0,40}$/', $name) !== 1) {
+            throw new InvalidArgumentException('Invalid savepoint name');
+        }
+
+        return $pdo->exec("{$statement} {$name}") !== false;
+    }
 
     /**
      * @param BindingsMap $params

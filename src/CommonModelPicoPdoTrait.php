@@ -167,6 +167,22 @@ trait CommonModelPicoPdoTrait
     }
 
     /**
+     * @template T
+     * @param callable():T $work
+     * @param (callable(T):bool)|null $isRejected
+     * @return T
+     */
+    public function runInTransaction(callable $work, callable|null $isRejected = null): mixed
+    {
+        return CommonModelPicoPdoUtils::transaction($this->pdo(), $work, $isRejected);
+    }
+
+    public function isInTransaction(): bool
+    {
+        return $this->pdo()->inTransaction();
+    }
+
+    /**
      * Run `EXPLAIN EXTENDED` then `SHOW WARNINGS` on the next {@see prepExec()} (including select/insert/update/delete).
      *
      * Consumed once. Replaced if called again before the next statement.

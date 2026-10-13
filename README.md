@@ -255,6 +255,25 @@ conditions, malformed batch shapes and empty IN bindings. An empty member inside
 batch is invalid. SQL preparation/execution failures throw `PDOException`, including when the
 connection uses `PDO::ERRMODE_SILENT`; the library leaves connection attributes unchanged.
 
+### Transaction units
+
+```php
+$result = $model->runInTransaction(function () use ($model): array {
+    $model->insert('users', ['name' => 'John']);
+    return ['status' => true];
+}, static fn(array $result): bool => !$result['status']); // a rejected result is rolled back and still returned
+
+$isNested = $model->isInTransaction();
+```
+
+`CommonModelPicoPdoUtils::transaction($pdo, $work, $isRejected)` runs one atomic unit. Without an open
+transaction it owns one (`beginTransaction` / `commit`); inside a caller's transaction it uses a generated
+savepoint (`SAVEPOINT` / `RELEASE SAVEPOINT`), so the caller keeps its own commit or rollback. A unit that
+throws is undone and its exception propagates; when the undo itself fails, a `RuntimeException` wraps it
+with the unit's failure as `previous`. A result the optional `$isRejected` callback classifies as a business
+rejection is undone the same way and returned unchanged. The trait offers the same unit on its own connection
+as `runInTransaction()` and reports the connection state through `isInTransaction()`.
+
 ### Statement diagnostics
 
 ```php
@@ -735,6 +754,8 @@ Each documented code example in the trait PHPDoc and this README has a matching 
 `tests/Unit/CommonModelPicoPdoTraitBatchChunkingTest.php`. Batch UPDATE scale / timing
 (200 / 2 000 / 20 000 rows, plus ~5 000 random-payload cases) lives in
 `tests/Unit/CommonModelPicoPdoTraitBatchUpdateScaleTest.php` (`@group slow`).
+Transaction units and savepoints live in `tests/Unit/CommonModelPicoPdoTransactionTest.php` (mocked PDO,
+no database) and `tests/Integration/CommonModelPicoPdoTransactionIntegrationTest.php` (real savepoints).
 Test names for doc examples are prefixed with `testDoc`.
 
 Verified on PHP 8.3.32 / PHPUnit 10.5.64 / MariaDB 10.6:
