@@ -147,6 +147,26 @@ $users = $model->selectAll('users', ['name', 'email'], ['status' => 'active']);
 $users = $model->selectAll('users', ['name'], ['status' => 'active'], null, 'ORDER BY name LIMIT 10');
 ```
 
+Pass a list of condition maps to match exact composite keys. Each nonempty map is an AND-group;
+groups are joined with OR, so the crossed organisation/person pairs are excluded:
+
+```php
+$memberships = $model->selectAll('memberships', ['org_id', 'person_id'], [
+    ['org_id' => 10, 'person_id' => 100],
+    ['org_id' => 20, 'person_id' => 200],
+], null, 'ORDER BY org_id, person_id');
+```
+
+The same condition lists work with `select()` and `selectOne()`. Sparse integer keys are accepted.
+Bindings may be one shared named map or a positional list of per-group bindings. Use explicit
+`IS NULL` and `IN (...)` predicates; the ordinary equality-map syntax retains its existing meaning.
+An empty condition group such as `[[]]` throws `InvalidArgumentException`; a top-level empty filter
+`[]` retains the existing unfiltered SELECT behavior.
+
+Native PDO prepares require distinct named markers when the same value appears more than once;
+emulated prepares allow marker reuse, following [PDO's prepare contract](https://www.php.net/manual/en/pdo.prepare.php).
+Per-group maps with the same marker name and different values are isolated by the batch compiler.
+
 ### INSERT
 
 ```php
@@ -762,7 +782,19 @@ Transaction units and savepoints live in `tests/Unit/CommonModelPicoPdoTransacti
 no database) and `tests/Integration/CommonModelPicoPdoTransactionIntegrationTest.php` (real savepoints).
 Test names for doc examples are prefixed with `testDoc`.
 
-Verified on 31 October 2026 with PHPUnit 10.5.64 and MariaDB 10.11.19:
+Row-set SELECT regression cases live in
+`tests/Integration/CommonModelPicoPdoRowSetSelectTest.php`. Its 33 cases cover native/emulated
+prepares, exact pairs and crossed decoys, wrappers/tails, sparse keys, duplicate pairs, per-group
+bindings, explicit NULL/IN expressions, caller transactions, empty groups and unchanged filters.
+
+Row-set import verified on 31 October 2026 with PHP 8.3.36, PHPUnit 10.5.64 and MariaDB 10.11.19:
+- Before import: **380 tests, 63,298 assertions**, no failures, errors or skips.
+- After import: **413 tests, 63,353 assertions**, no failures, errors or skips.
+- All 380 original cases and their source remain unchanged. Xdebug was off and timing checks were
+  enabled in both full runs. The new composite-pair case failed before the import in both prepare
+  modes, then passed after the source change.
+
+Earlier quoted-INSERT verification (`6ec4030`, 31 October 2026) with PHPUnit 10.5.64 and MariaDB 10.11.19:
 - **PHP 8.3.36: 380 tests, 63,298 assertions**, no failures, errors or skips, with Xdebug off and timing checks enabled.
 - **Coverage: 100% lines (706/706) and methods (56/56)** across both source files, using Xdebug 3.4.2. The coverage run passed 380 tests and 63,282 assertions; the existing timing assertions are disabled under coverage.
 - **23 added regression cases** cover quoted plain identifiers, both PDO prepare modes, generated IDs, NULL/literal values, batches, mixed shapes, REPLACE, INSERT IGNORE, upserts and rollback. All 23 also pass on PHP 8.5.12.

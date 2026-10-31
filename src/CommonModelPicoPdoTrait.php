@@ -103,6 +103,12 @@ use Throwable;
  *
  * **List** (batch UPDATE only) — one condition per `$data` row, same index order.
  *
+ * **List of condition maps** (batch DELETE and SELECT) — each nonempty map is one parenthesized
+ * AND-group and the groups are OR-joined, preserving each composite-key pair:
+ * ```
+ * [['fw_id' => 255, 'mannschaft_id' => 200053], ['fw_id' => 295, 'mannschaft_id' => 200054]]
+ * ```
+ *
  * ### `$bindings` (`int|string|BindingsMap|list<...>|null`)
  * Values for placeholders in `$where` (or in raw `$data` / `$where` entries).
  *
@@ -110,7 +116,7 @@ use Throwable;
  * - Positional list — for `?` placeholders: `['a@example.com', 'active']`
  * - Named map — for `:placeholder` keys: `[':status' => 'active', ':ids' => [1, 2, 3]]`.
  *   On batch operations the map is shared: each name is bound once for the whole statement.
- * - Per-row list (batch UPDATE/DELETE) — `[$bindingsRow0, $bindingsRow1, …]` aligned with `$data` /
+ * - Per-row list (batch UPDATE/DELETE, row-set SELECT) — `[$bindingsRow0, $bindingsRow1, …]` aligned with `$data` /
  *   `$where`. A `:name` reused across rows is isolated per row when the values differ; identical
  *   values collapse to one shared bind.
  *
@@ -693,17 +699,36 @@ trait CommonModelPicoPdoTrait
      *  'created_at > ?' => $date,
      * ], [':date' => $date])->fetchAll(PDO::FETCH_ASSOC);
      * ```
+     * Row set (list of condition maps — one OR-group per entry, compiled like batch {@see delete()}):
+     * ```
+     * $db->select('mannschaft', 'fw_id, mannschaft_id', [
+     *     ['fw_id' => 255, 'mannschaft_id' => 200053],
+     *     ['fw_id' => 295, 'mannschaft_id' => 200054],
+     * ], null, 'FOR UPDATE')->fetchAll(PDO::FETCH_ASSOC);
+     * // SELECT … WHERE (fw_id = :b0_w_fw_id AND mannschaft_id = :b0_w_mannschaft_id) OR (fw_id = :b1_w_fw_id AND …) FOR UPDATE
+     * ```
      * @param string $table Table name
      * @param list<string>|string|int|null $columns Columns to select (default '*')
-     * @param WhereInput $where Column name, condition string, or associative array
-     * @param int|string|BindingsMap|null $bindings Value for single column or array of bound values for custom condition
+     * @param WhereInput $where Column name, condition string, associative array, or nonempty list of condition maps
+     * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings Value for single column or array of bound values for custom condition; per-row list for a row set
      * @param string|null $sqlTail Extra query suffix (e.g. GROUP BY, ORDER BY, LIMIT, etc.)
      * @return PDOStatement
+     * @throws InvalidArgumentException When a row set contains an empty condition map
      */
     protected function select(string $table, array|string|int|null $columns = null, string|array|null $where = null, int|string|array|null $bindings = null, string|null $sqlTail = null): PDOStatement
     {
         $columnList = implode(', ', is_array($columns) ? ($columns ?: ['*']) : [$columns ?: '*']);
-        [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
+        if (is_array($where) && CommonModelPicoPdoUtils::isRowSet($where)) {
+            if (in_array([], $where, true)) {
+                throw new InvalidArgumentException('Row-set SELECT conditions cannot be empty');
+            }
+            [$whereClause, $params] = $this->buildDeleteSqlParts(
+                array_values($where),
+                CommonModelPicoPdoUtils::normalizePositionalBindings($bindings)
+            );
+        } else {
+            [$whereClause, $params] = $this->buildWhereQuery($where, $bindings);
+        }
         $whereClause = trim($whereClause);
         if ($whereClause !== '' && preg_match('/^WHERE\b/i', $whereClause) !== 1) {
             $whereClause = 'WHERE ' . $whereClause;
@@ -1411,7 +1436,7 @@ trait CommonModelPicoPdoTrait
 
 
     /**
-     * Compiles parallel delete WHERE rows into [WHERE clause, params] for batch {@see delete()}.
+     * Compiles parallel WHERE rows into [WHERE clause, params] for batch {@see delete()} and row-set {@see select()}.
      *
      * @param list<DataMap|string> $whereRows
      * @param int|string|BindingsMap|list<int|string|BindingsMap>|null $bindings
