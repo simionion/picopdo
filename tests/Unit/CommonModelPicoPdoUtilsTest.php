@@ -7,6 +7,7 @@ namespace Lodur\PicoPdo\Tests;
 use Lodur\PicoPdo\CommonModelPicoPdoUtils;
 use PDO;
 use PDOStatement;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use PHPUnit\Framework\TestCase;
@@ -117,6 +118,47 @@ class CommonModelPicoPdoUtilsTest extends TestCase
             ['name' => 'A', 'created_at = NOW()'],
             ['name' => 'B', 'role' => 'admin'],
         ]));
+    }
+
+    public function testInsertBatchBindsQuotedColumnsAndKeepsSqlIdentifierQuotes(): void
+    {
+        $batches = CommonModelPicoPdoUtils::buildInsertBatches([[
+            '`rows`' => 7,
+            'name' => "O'Brien ? :name",
+            '`note`' => null,
+            'created_at = NOW()',
+        ]]);
+
+        $this->assertSame([
+            '`rows`|name|`note`|created_at' => [
+                '`rows`, name, `note`, created_at',
+                ['(:row_0_rows, :row_0_name, :row_0_note, NOW())'],
+                [':row_0_rows' => 7, ':row_0_name' => "O'Brien ? :name", ':row_0_note' => null],
+            ],
+        ], $batches);
+    }
+
+    public static function insertKeyForms(): array
+    {
+        return [
+            'ordinary' => ['name', ':row_0_name'],
+            'ordinary binding-like name' => ['row_0_name', ':row_0_row_0_name'],
+            'quoted reserved name' => ['`rows`', ':row_0_rows'],
+            'quoted underscore and digit' => ['`_count2`', ':row_0__count2'],
+            'unclosed quote' => ['`rows', ':row_0_`rows'],
+            'extra quotes' => ['``rows``', ':row_0_``rows``'],
+            'qualified form' => ['`table`.`rows`', ':row_0_`table`.`rows`'],
+            'non-plain name' => ['`row-count`', ':row_0_`row-count`'],
+        ];
+    }
+
+    #[DataProvider('insertKeyForms')]
+    public function testInsertBindingsNormalizeOnlyBacktickedPlainIdentifiers(string $key, string $placeholder): void
+    {
+        $batches = array_values(CommonModelPicoPdoUtils::buildInsertBatches([[$key => 'value']]));
+
+        $this->assertSame($key, $batches[0][0]);
+        $this->assertSame([$placeholder => 'value'], $batches[0][2]);
     }
 
     public function testNormalizePositionalBindings(): void

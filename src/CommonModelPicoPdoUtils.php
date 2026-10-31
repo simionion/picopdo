@@ -253,7 +253,12 @@ final class CommonModelPicoPdoUtils
                     [$column, $expression] = self::splitAssignment((string)$value);
                 } else {
                     // Key-value pair: bind the value under a per-row unique placeholder.
-                    [$column, $expression] = [$key, ":row_{$i}_{$key}"];
+                    // Keep identifier quotes in SQL, and use the plain name for its binding.
+                    $parameterKey = (string)$key;
+                    if (str_starts_with($parameterKey, '`') && self::quoteIdentifier(trim($parameterKey, '`')) === $parameterKey) {
+                        $parameterKey = trim($parameterKey, '`');
+                    }
+                    [$column, $expression] = [$key, ":row_{$i}_{$parameterKey}"];
                     $params[$expression] = $value;
                 }
                 $columns[] = $column;

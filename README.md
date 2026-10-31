@@ -185,6 +185,10 @@ foreach ($incoming as $user) {
 $model->insert('users', $rows);
 ```
 
+Backticked plain column names are supported in INSERT data maps, for example
+``['`rows`' => 7]``. Identifier quotes stay in the SQL column list; PDO binding names use the
+plain identifier. Qualified and non-plain key forms retain their existing handling. Regression
+coverage is in `tests/Integration/CommonModelPicoPdoQuotedInsertTest.php` and the utility unit tests.
 ### UPDATE
 
 ```php
@@ -758,15 +762,15 @@ Transaction units and savepoints live in `tests/Unit/CommonModelPicoPdoTransacti
 no database) and `tests/Integration/CommonModelPicoPdoTransactionIntegrationTest.php` (real savepoints).
 Test names for doc examples are prefixed with `testDoc`.
 
-Verified on PHP 8.3.32 / PHPUnit 10.5.64 / MariaDB 10.6:
-- **340 tests** (189 unit, 151 integration), **63,160 assertions**, no failures/errors/skips with Xdebug off.
-- **100%** lines (660/660) and methods (48/48) across both source files with Xdebug coverage.
-- Coverage run: 340 tests and 63,144 assertions. Timing assertions are disabled under coverage;
-  the complete timing checks passed separately with `XDEBUG_MODE=off`.
-- Updated tests cover typed bindings, one-shot diagnostics, PDO SILENT/EXCEPTION behavior,
-  scalar/batch REPLACE metadata and empty-write collections. The tracked `coverage.txt` and
-  `coverage.xml` files contain the refreshed coverage results.
+Verified on 31 October 2026 with PHPUnit 10.5.64 and MariaDB 10.11.19:
+- **PHP 8.3.36: 380 tests, 63,298 assertions**, no failures, errors or skips, with Xdebug off and timing checks enabled.
+- **Coverage: 100% lines (706/706) and methods (56/56)** across both source files, using Xdebug 3.4.2. The coverage run passed 380 tests and 63,282 assertions; the existing timing assertions are disabled under coverage.
+- **23 added regression cases** cover quoted plain identifiers, both PDO prepare modes, generated IDs, NULL/literal values, batches, mixed shapes, REPLACE, INSERT IGNORE, upserts and rollback. All 23 also pass on PHP 8.5.12.
+- The PHP 8.5.12 full run executes all 380 tests with no deprecations, but **three reference timing limits fail** (200 rows, 20,000 rows and the 5,000-row random payload). Earlier PHP 8.3 runs also showed timing variance. The existing timing bounds have not been changed; the PHP 8.5 full run is not an all-green result.
+- The packet-limit control test checks an oversized payload on a healthy connection and accepts either server rejection 1153 or the resulting mysqlnd disconnect 2006. Eight obsolete reflection `setAccessible()` calls were removed from tests for PHP 8.5 compatibility.
+- MariaDB 10.6 could not be pulled in this session. Verification used a cached MariaDB 10.11.19 image in an isolated test database. The tracked coverage reports contain the successful PHP 8.3 coverage results.
 
+For host-side coverage, make the Xdebug configuration available through `PHP_INI_SCAN_DIR` so PHPUnit's isolated child processes load it too; a parent-only `-d zend_extension=...` does not propagate to those children.
 ```bash
 docker compose exec -T -e XDEBUG_MODE=off app vendor/bin/phpunit  # Includes timing assertions
 make test              # Run all tests with coverage

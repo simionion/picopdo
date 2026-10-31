@@ -678,7 +678,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
         // buildUpdateSqlParts always emits CASE/WHEN — a batch of one is still a batch.
         // Plain single updates never reach it; update() routes them through buildSqlClause/buildWhereQuery.
         $method = new \ReflectionMethod(self::class, 'buildUpdateSqlParts');
-        $method->setAccessible(true);
         [$set, $where, $params] = $method->invoke($this,
             [['name' => 'A', 'touched_at = NOW()']],
             [['id' => 1]],
@@ -759,7 +758,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
     public function testBuildBatchUpdateSqlParts(): void
     {
         $method = new \ReflectionMethod(self::class, 'buildUpdateSqlParts');
-        $method->setAccessible(true);
         [$set, $where, $params] = $method->invoke($this,
             [
                 ['name' => 'Alice', 'status' => 'active'],
@@ -803,7 +801,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
     public function testBuildDeleteSqlPartsOrJoinsParenthesizedRowConditions(): void
     {
         $method = new \ReflectionMethod(self::class, 'buildDeleteSqlParts');
-        $method->setAccessible(true);
         [$where, $params] = $method->invoke($this, [
             ['id' => 1, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'a'],
             ['id' => 2, 'status' => 'inactive', 'email_verified' => 0, 'role' => 'b'],
@@ -823,7 +820,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
     public function testBuildDeleteSqlPartsPerRowBindingsAndQuestionMarkKeys(): void
     {
         $method = new \ReflectionMethod(self::class, 'buildDeleteSqlParts');
-        $method->setAccessible(true);
         // buildDeleteSqlParts accepts string rows; delete() itself only batches a list of maps.
         [$where, $params] = $method->invoke($this, [
             ['id = ?' => 10],
@@ -985,7 +981,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
     public function testBatchUpdateWithColumnShorthandWhereList(): void
     {
         $method = new \ReflectionMethod(self::class, 'buildUpdateSqlParts');
-        $method->setAccessible(true);
         [$set, $where, $params] = $method->invoke($this,
             [['name' => 'A'], ['name' => 'B']],
             ['id', 'id'],
@@ -1001,7 +996,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
     {
         // Mirrors the 4-row multi update example in update() PHPDoc.
         $method = new \ReflectionMethod(self::class, 'buildUpdateSqlParts');
-        $method->setAccessible(true);
         $since = '2024-01-01';
         $teamIds = [10, 11, 12];
         [$set, $where, $params] = $method->invoke($this,
@@ -1086,7 +1080,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
     public function testBatchUpdateSupportsFullSingleRowFeatureSetPerEntry(): void
     {
         $method = new \ReflectionMethod(self::class, 'buildUpdateSqlParts');
-        $method->setAccessible(true);
         [$set, $where, $params] = $method->invoke($this,
             [
                 ['views = views + ?' => 5, 'touched_at = NOW()'],
@@ -1288,7 +1281,6 @@ class CommonModelPicoPdoTraitTest extends TestCase
     public function testDocBuildUpdateSqlPartsAbExample(): void
     {
         $method = new \ReflectionMethod(self::class, 'buildUpdateSqlParts');
-        $method->setAccessible(true);
         [$set, $where, $params] = $method->invoke(
             $this,
             [['name' => 'A'], ['name' => 'B']],

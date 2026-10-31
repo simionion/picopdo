@@ -13,7 +13,7 @@ use PHPUnit\Framework\TestCase;
  * TDD: batch INSERT / UPDATE / DELETE that exceed MySQL `max_allowed_packet` (16 MiB).
  *
  * Setup pins the server packet limit at 16 MiB. Without chunking, a single multi-row
- * statement larger than that fails with error 1153. With chunking, the same public
+ * statement larger than that is rejected, sometimes dropping the connection. With chunking, the same public
  * API calls must succeed and persist every row.
  *
  * These tests are expected to FAIL until batch chunking is implemented, then PASS.
@@ -106,14 +106,20 @@ class CommonModelPicoPdoTraitBatchChunkingTest extends TestCase
         }
         $sql = 'INSERT INTO ' . self::TABLE . ' (payload) VALUES ' . implode(', ', $placeholders);
 
-        $this->expectException(PDOException::class);
-        $this->expectExceptionMessage("Got a packet bigger than 'max_allowed_packet' bytes");
+        $this->assertGreaterThan(self::PACKET_LIMIT_BYTES, strlen($blob) * count($params));
+        $this->assertSame(1, (int)$this->pdo->query('SELECT 1')->fetchColumn());
 
         $stmt = $this->pdo->prepare($sql);
         foreach ($params as $key => $value) {
             $stmt->bindValue($key, $value);
         }
-        $stmt->execute();
+        try {
+            $stmt->execute();
+            $this->fail('The server must reject an oversized unchunked statement');
+        } catch (PDOException $failure) {
+            // mysqlnd can report the resulting disconnect (2006) instead of server error 1153.
+            $this->assertContains($failure->errorInfo[1] ?? null, [1153, 2006]);
+        }
     }
 
     public function testBatchInsertExceeding16MbSucceedsViaChunking(): void
