@@ -1400,7 +1400,7 @@ trait CommonModelPicoPdoTrait
 
         $rowCount = 0;
 
-        $this->withAtomicStatements(2, function () use (
+        $this->withTransaction(function () use (
             $staging,
             $keys,
             $columnList,
@@ -1541,21 +1541,33 @@ trait CommonModelPicoPdoTrait
 
 
     /**
-     * Keep a multi-statement operation all-or-nothing.
-     *
-     * One statement is atomic by itself; several are not, so this opens a transaction whenever
-     * the operation will execute more than one statement — unless the caller already runs one,
-     * whose commit then governs.
+     * Avoid a transaction for one planned write statement, while keeping batch writes atomic.
+     * Domain operations that may reject a successful statement must use withTransaction() instead.
      *
      * @template T
      * @param int $statementCount
      * @param callable():T $work
-     * @return mixed
+     * @return T
      * @throws Throwable
      */
     private function withAtomicStatements(int $statementCount, callable $work): mixed
     {
-        $ownTransaction = $statementCount > 1 && !$this->pdo()->inTransaction();
+        return $statementCount > 1 ? $this->withTransaction($work) : $work();
+    }
+
+
+    /**
+     * Roll back an owned transaction if a statement, later validation, or callback fails.
+     * An existing transaction remains caller-owned, including its rollback.
+     *
+     * @template T
+     * @param callable():T $work
+     * @return T
+     * @throws Throwable
+     */
+    private function withTransaction(callable $work): mixed
+    {
+        $ownTransaction = !$this->pdo()->inTransaction();
         if ($ownTransaction) {
             $this->pdo()->beginTransaction();
         }

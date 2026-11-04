@@ -207,6 +207,93 @@ class CommonModelPicoPdoTransactionTest extends TestCase
         $this->assertCount(2, $statements, 'a nested trait unit uses a savepoint');
     }
 
+    public function testExplicitTransactionWrapsASingleBusinessWrite(): void
+    {
+        $pdo = $this->createMock(PDO::class);
+        $pdo->method('inTransaction')->willReturn(false);
+        $pdo->expects($this->once())->method('beginTransaction')->willReturn(true);
+        $pdo->expects($this->once())->method('commit')->willReturn(true);
+        $pdo->expects($this->never())->method('rollBack');
+
+        $this->assertSame('ok', $this->exposedHost($pdo)->runExplicit(static fn(): string => 'ok'));
+    }
+
+    public function testExplicitTransactionRollsBackAnOwnedTransactionWhenLaterValidationThrows(): void
+    {
+        $pdo = $this->createMock(PDO::class);
+        $pdo->method('inTransaction')->willReturn(false);
+        $pdo->expects($this->once())->method('beginTransaction')->willReturn(true);
+        $pdo->expects($this->once())->method('rollBack')->willReturn(true);
+        $pdo->expects($this->never())->method('commit');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('rejected after the write');
+        $this->exposedHost($pdo)->runExplicit(static function (): never {
+            throw new RuntimeException('rejected after the write');
+        });
+    }
+
+    public function testExplicitTransactionLeavesACallerOwnedTransactionAlone(): void
+    {
+        $pdo = $this->createMock(PDO::class);
+        $pdo->method('inTransaction')->willReturn(true);
+        $pdo->expects($this->never())->method('beginTransaction');
+        $pdo->expects($this->never())->method('commit');
+        $pdo->expects($this->never())->method('rollBack');
+        $host = $this->exposedHost($pdo);
+
+        $this->assertSame(5, $host->runExplicit(static fn(): int => 5));
+
+        $this->expectException(RuntimeException::class);
+        $host->runExplicit(static function (): never {
+            throw new RuntimeException('caller decides the rollback');
+        });
+    }
+
+    public function testCountGatedHelperSkipsTheTransactionForOneStatement(): void
+    {
+        $pdo = $this->createMock(PDO::class);
+        $pdo->expects($this->never())->method('inTransaction');
+        $pdo->expects($this->never())->method('beginTransaction');
+        $pdo->expects($this->never())->method('commit');
+
+        $this->assertSame('one', $this->exposedHost($pdo)->runCounted(1, static fn(): string => 'one'));
+    }
+
+    public function testCountGatedHelperOpensOneOwnedTransactionForSeveralStatements(): void
+    {
+        $pdo = $this->createMock(PDO::class);
+        $pdo->method('inTransaction')->willReturn(false);
+        $pdo->expects($this->once())->method('beginTransaction')->willReturn(true);
+        $pdo->expects($this->once())->method('commit')->willReturn(true);
+
+        $this->assertSame('many', $this->exposedHost($pdo)->runCounted(2, static fn(): string => 'many'));
+    }
+
+    public function testCountGatedHelperRollsBackOnFailureAndKeepsTheCallersTransaction(): void
+    {
+        $owned = $this->createMock(PDO::class);
+        $owned->method('inTransaction')->willReturn(false);
+        $owned->method('beginTransaction')->willReturn(true);
+        $owned->expects($this->once())->method('rollBack')->willReturn(true);
+        $owned->expects($this->never())->method('commit');
+
+        try {
+            $this->exposedHost($owned)->runCounted(3, static function (): never {
+                throw new PDOException('chunk failed');
+            });
+            $this->fail('The chunk failure must propagate');
+        } catch (PDOException $caught) {
+            $this->assertSame('chunk failed', $caught->getMessage());
+        }
+
+        $caller = $this->createMock(PDO::class);
+        $caller->method('inTransaction')->willReturn(true);
+        $caller->expects($this->never())->method('beginTransaction');
+        $caller->expects($this->never())->method('rollBack');
+        $this->assertSame(9, $this->exposedHost($caller)->runCounted(3, static fn(): int => 9));
+    }
+
     /**
      * A connection inside a caller's transaction; every `exec()` is recorded in `$statements`.
      *
@@ -222,6 +309,28 @@ class CommonModelPicoPdoTransactionTest extends TestCase
         });
 
         return $pdo;
+    }
+
+    /** Exposes the private explicit-transaction and count-gated helpers for protocol tests. */
+    private function exposedHost(PDO $pdo): object
+    {
+        return new class ($pdo) {
+            use CommonModelPicoPdoTrait;
+
+            public function __construct(private PDO $connection)
+            {
+            }
+
+            public function runExplicit(callable $work): mixed
+            {
+                return $this->withTransaction($work);
+            }
+
+            public function runCounted(int $statementCount, callable $work): mixed
+            {
+                return $this->withAtomicStatements($statementCount, $work);
+            }
+        };
     }
 
     private function host(PDO $pdo): object
