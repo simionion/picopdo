@@ -404,8 +404,9 @@ trait CommonModelPicoPdoTrait
         $chunks = CommonModelPicoPdoUtils::chunkForPacket($rows, $fixedBytes);
         $statementCount = count($chunks) > 1 || CommonModelPicoPdoUtils::hasMultipleInsertShapes($rows) ? 2 : 1;
         $rowCount = 0;
+        $lastInsertId = 0;
 
-        $this->withAtomicStatements($statementCount, function () use ($chunks, $insertMode, $table, $onDuplicateKeyUpdate, &$rowCount): void {
+        $this->withAtomicStatements($statementCount, function () use ($chunks, $insertMode, $table, $onDuplicateKeyUpdate, &$rowCount, &$lastInsertId): void {
             foreach ($chunks as $chunk) {
                 foreach (CommonModelPicoPdoUtils::buildInsertBatches($chunk) as [$columns, $valueRows, $params]) {
                     $sql = "{$insertMode} INTO {$table} ({$columns}) VALUES " . implode(', ', $valueRows);
@@ -416,12 +417,15 @@ trait CommonModelPicoPdoTrait
                     $rowCount += $this->prepExec($sql, $params)->rowCount();
                 }
             }
+
+            // Read the ID inside the unit, right after the final INSERT statement: the driver reports
+            // the connection's latest statement, so reading after an owned COMMIT would yield 0.
+            // For a multi-statement batch this is the ID reported by the final INSERT statement,
+            // not an ID range for the complete batch.
+            $lastInsertId = $this->pdo()->lastInsertId() ?: 0;
         });
 
         $isSuccess = $rowCount > 0;
-        // For a multi-statement batch this is the ID reported by the final INSERT statement,
-        // not an ID range for the complete batch.
-        $lastInsertId = $this->pdo()->lastInsertId() ?: 0;
         $rawId = $isSuccess ? $lastInsertId : 0;
         $id = is_numeric($rawId) ? (int)$rawId : $rawId;
 
